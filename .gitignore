@@ -1,0 +1,67 @@
+########################################
+# Build- und Compiler-Output
+########################################
+build/
+build*/
+bazel-*/
+
+*.bat
+
+# CMake temporäre Dateien
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+*.ninja
+*.ninja_deps
+*.ninja_log
+
+########################################
+# Cache, temporäre und Log-Dateien
+########################################
+.cache/
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+
+########################################
+# Benchmark- oder Download-Daten
+########################################
+third_party/corpora/
+third_party/hdrvdp-2.2.2/
+third_party/hdrvdp-2.2.2.zip
+third_party/hdrvdp-2.2.2.zip.tmp
+
+########################################
+# Tools / Scripts Output
+########################################
+tools/benchmark/metrics/plots/
+tools/benchmark/metrics/results.csv
+tools/conformance/__pycache__/
+
+########################################
+# Editor- und System-Dateien
+########################################
+.vscode/
+*.code-workspace
+.DS_Store
+Thumbs.db
+
+########################################
+# Python Cache 
+########################################
+__pycache__/
+*.pyc
+*.pyo
+
+########################################
+# IDEs 
+########################################
+.idea/
+*.iml
+*.user
+*.suo
+*.sln.docstates
