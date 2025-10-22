@@ -7,6 +7,13 @@ bazel-*/
 
 *.bat
 
+
+# Executables / bin folder
+bin/
+bin*/
+*/bin/
+
+
 # CMake temporäre Dateien
 CMakeFiles/
 CMakeCache.txt
