@@ -90,75 +90,46 @@ bool readCmdLine( int argc, char** argv, cmdPars& pars )
 //   E N T R O P Y   C O D I N G
 //
 //======================================================
-class BinaryPmfFixed : public IPmf
-{
-public:
-  BinaryPmfFixed( unsigned Vbits ) : V( Vbits ) {}
-  uint64_t operator[] ( unsigned ) const  { return uint64_t(1)<<(V-1); }
-  void     update     ( unsigned )        {}
-private:
-  const unsigned   V;
-};
-
-
-class BinaryPmfAdaptive : public IPmf
-{
-public:
-  BinaryPmfAdaptive( unsigned Vbits, unsigned winSize ) : V( Vbits ), W( winSize ), p0( 1<<(V-1) )
-  { 
-    if( W >= V-1 ) throw 1; 
-  }
-  uint64_t operator[] ( unsigned index ) const  { return index ? (1<<V)-p0 : p0; }
-  void     update     ( unsigned index )
-  {
-    if( index )   p0 -= ( p0 >> W );
-    else          p0 += ( ( (1<<V) - p0 ) >> W );
-  }
-private:
-  const unsigned   V;
-  const unsigned   W; // window size
-  unsigned         p0;
-};
-
-
 class EntropyCoderBase
 {
 protected:
-  EntropyCoderBase() : m_pmfFixed(V)
+  EntropyCoderBase() 
   {
-    // initialization of binary pmfs for absolute values
-    for( unsigned k = 0; k < N; k++ )
-      m_pmfAbs.push_back( BinaryPmfAdaptive( V, W ) );
+    m_pmfAbs  = std::vector<uint8_t>(N, uint8_t{0});  
   }
+
 protected:
-  static const unsigned     V = 11;     // number of bits for probability masses
-  static const unsigned     U = 20;     // number of bits for interval width
-  static const unsigned     W = 5;      // window size for pmf update
-  static const unsigned     N = 3;      // number of probability models for unary binarization of absolute values
-  std::vector<BinaryPmfAdaptive>  m_pmfAbs;   // probability models for coding absolute values
-  BinaryPmfFixed                  m_pmfFixed; // fixed probability model (for sign, mode bits)
+  static const unsigned   N = 3;    // number of probability models for unary binarization of absolute values
+  std::vector<uint8_t>    m_pmfAbs; // probability models for coding absolute values
 };
 
 
 class EntropyEncoder : protected EntropyCoderBase
 {
 public:
-  EntropyEncoder( OBitstream& bs ) : EntropyCoderBase(), aenc( U, V, bs )
-  {}
+  EntropyEncoder( OBitstream& bs ) : EntropyCoderBase(), aenc(bs)
+  {
+    aenc.start();
+  }
   void encodeSample  ( PGMImage::Sample s );
-  void finish        ()    { aenc.terminate(); }
+  void finish        ()    
+  { 
+    aenc.finish(); 
+  }
 private:
-  ArithEnc aenc;
+  ArithmeticEncoder aenc;
 };
 
 class EntropyDecoder : protected EntropyCoderBase
 {
 public:
-  EntropyDecoder( IBitstream& bs ) : EntropyCoderBase(), adec( U, V, bs )
-  {}
+  EntropyDecoder( IBitstream& bs ) : EntropyCoderBase(), adec(bs)
+  {
+    adec.start();
+  }
   PGMImage::Sample  decodeSample  ();
 private:
-  ArithDec adec;
+  ArithmeticDecoder adec;
 };
 
 void EntropyEncoder::encodeSample( PGMImage::Sample s )
@@ -168,22 +139,22 @@ void EntropyEncoder::encodeSample( PGMImage::Sample s )
   unsigned binIdx   = 0;
   while( rem-- )
   {
-    aenc.encode ( 1, m_pmfAbs[ std::min<unsigned>( N-1, binIdx++ ) ] );
+    aenc.encBin ( m_pmfAbs[ std::min<unsigned>( N-1, binIdx++ ) ], 1 );
   }
-  aenc.encode   ( 0, m_pmfAbs[ std::min<unsigned>( N-1, binIdx++ ) ] );
+  aenc.encBin   ( m_pmfAbs[ std::min<unsigned>( N-1, binIdx++ ) ], 0 );
   if( absValue )
-    aenc.encode ( s<0, m_pmfFixed );
+    aenc.encBit ( s<0 );
 }
 
 PGMImage::Sample EntropyDecoder::decodeSample()
 {
   PGMImage::Sample  s      = 0;
   unsigned          binIdx = 0;
-  while( adec.decode( m_pmfAbs[ std::min<unsigned>( N-1, binIdx++ ) ] ) )
+  while( adec.decBin( m_pmfAbs[ std::min<unsigned>( N-1, binIdx++ ) ] ) )
   {
     s++;
   }
-  if( s && adec.decode( m_pmfFixed ) )
+  if( s && adec.decBit() )
     s = -s;
   return s;
 }
@@ -271,7 +242,7 @@ void encode( const std::string& inname, const std::string& outname )
     eenc.encodeSample( data[k] );
   eenc.finish();
 
-  bs.flush();
+  bs.byteAlign();
   assert( stream.good() );
 }
 

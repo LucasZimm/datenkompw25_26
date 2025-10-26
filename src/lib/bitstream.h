@@ -2,7 +2,7 @@
 #pragma once
 
 #include <iostream>
-
+#include <cstdint>
 
 typedef uint8_t Bit;
 
@@ -22,8 +22,8 @@ public:
   void        addBit    ( const Bit _bit );
   OBitstream& operator<<( const Bit _bit );  // for convenience
 
-  // fill last byte (required at end)
-  void flush  ();
+  // add zero or more bits equal to 0 until the bitstream is byte aligned
+  void byteAlign();
 
   // add bit pattern for representing integer values using fixed-length code
   template< typename T >
@@ -52,6 +52,9 @@ public:
   // check for eof or errors
   bool eof    () const { return m_eof; }
   bool good   () const { return m_inStream.good(); }
+
+  // read bits until stream is byte-aligned
+  void        byteAlign ();
 
   // get next single bit from bitstream
   Bit         getBit    ();
