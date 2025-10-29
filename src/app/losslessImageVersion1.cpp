@@ -198,7 +198,13 @@ private:
     PGMImage::Sample X = ( x > 0 ? line[x-1] : y > 0 ? line[x-m_width]   : 128 ); // fallback
     PGMImage::Sample L = ( x > 0                     ? line[x-1]         : X );
     PGMImage::Sample A = ( y > 0                     ? line[x-m_width]   : X );
-    return (L+A+1)>>1;
+    PGMImage::Sample C = ( x > 0 && y > 0            ? line[x-m_width-1]   : X );
+    if (C >= std::max(L, A))
+        return std::min(L, A);
+    else if (C <= std::min(L, A))
+        return std::max(L, A);
+    else
+        return L + A - C;
   }
 
 private:
