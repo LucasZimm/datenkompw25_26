@@ -30,7 +30,7 @@ if( NOT CMAKE_CONFIGURATION_TYPES AND
 endif()
 
 #----- set c++11 -----
-set( CMAKE_CXX_STANDARD          17 )
+set( CMAKE_CXX_STANDARD          20 )
 set( CMAKE_CXX_STANDARD_REQUIRED ON )
 
 #----- compiler options -----

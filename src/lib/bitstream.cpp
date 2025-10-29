@@ -11,7 +11,7 @@ OBitstream::OBitstream( std::ostream& _os )
 OBitstream::~OBitstream() 
 { 
   // fill last byte (if not done already)
-  flush(); 
+  byteAlign(); 
 }
 
 void OBitstream::addBit( const Bit _bit )
@@ -32,12 +32,11 @@ OBitstream& OBitstream::operator<<( const Bit _bit )
   return *this;
 }
 
-void OBitstream::flush()
+void OBitstream::byteAlign()
 {
   // add bits equal to 0 until last byte is completed
-  while( m_freeBits < 8 )
+  while( m_freeBits != 8 )
     addBit( Bit(0) );
-  m_outStream.flush();
 }
 
 
@@ -79,3 +78,8 @@ IBitstream& IBitstream::operator>>( Bit& _bit )
   return *this;
 }
 
+void IBitstream::byteAlign()
+{
+  // set available bits to zero, so that remaining bits in bufferedByte are ignored
+  m_availBits = 0;
+}
