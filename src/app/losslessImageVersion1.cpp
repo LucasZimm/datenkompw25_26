@@ -165,53 +165,208 @@ PGMImage::Sample EntropyDecoder::decodeSample()
 
 //======================================================
 //
-//   P R E D I C T I O N
+//   LOCO-I PREDICTOR (JPEG-LS)
 //
 //======================================================
 class Prediction
 {
 public:
-  Prediction( int width, int height, std::vector<PGMImage::Sample>& img )
-    : m_width(width), m_height(height), m_data(img), m_org(m_data)
-  {}
-  void subtractPrediction()
-  {
-    const PGMImage::Sample* orgLine = m_org .data();
-    PGMImage::Sample*       line    = m_data.data();
-    for( int row = 0; row < m_height; row++, line+=m_width, orgLine+=m_width )
-      for( int col = 0; col < m_width; col++ )
-        line[col] -= getPrediction( orgLine, col, row );
-  }
-  void addPrediction()
-  {
-    PGMImage::Sample*       recLine = m_org .data();
-    const PGMImage::Sample* line    = m_data.data();
-    for( int row = 0; row < m_height; row++, line+=m_width, recLine+=m_width )
-      for( int col = 0; col < m_width; col++ )
-        recLine[col] = line[col] + getPrediction( recLine, col, row );
-    m_data = m_org;
-  }
+    Prediction(int width, int height, std::vector<PGMImage::Sample>& img)
+        : m_width(width), m_height(height), m_data(img), m_org(m_data)
+    {
+        m_ctxs.resize(365); // 9^3 = 729 / 2 (für Vorzeichen) → 365 Kontexte
+    }
+
+    // ------------------------------
+    // Subtract prediction (encoding)
+    // ------------------------------
+    void subtractPrediction()
+    {
+        const PGMImage::Sample* orgData = m_org.data();
+        PGMImage::Sample* data = m_data.data();
+
+        for (int y = 0; y < m_height; ++y)
+        {
+            for (int x = 0; x < m_width; ++x)
+            {
+                int ctx;
+                int pred = getPrediction(orgData, x, y, ctx);
+
+                int e = int(orgData[y * m_width + x]) - pred;
+                if (ctx < 0) e = -e;
+
+                // modulo correction for residuals
+                int halfA = a / 2;
+                e = ((e + halfA) % a) - halfA;
+
+                data[y * m_width + x] = static_cast<PGMImage::Sample>(std::clamp(e, -128, 127));
+
+                updateContext(ctx, e);
+            }
+        }
+    }
+
+    // ------------------------------
+    // Add prediction (decoding)
+    // ------------------------------
+    void addPrediction()
+    {
+        PGMImage::Sample* recData = m_org.data();
+        const PGMImage::Sample* data = m_data.data();
+
+        for (int y = 0; y < m_height; ++y)
+        {
+            for (int x = 0; x < m_width; ++x)
+            {
+                int ctx;
+                int pred = getPrediction(recData, x, y, ctx); // auf rekonstruierten Nachbarn
+
+                int e = int(data[y * m_width + x]);
+                if (ctx < 0) e = -e;
+
+                int val = (pred + e + a) % a;
+                recData[y * m_width + x] = static_cast<PGMImage::Sample>(std::clamp(val, 0, 255));
+
+                updateContext(ctx, e); // wichtig: hier den Fehlerwert verwenden
+            }
+        }
+
+        m_data = m_org; // optional, falls du rekonstruiertes Bild zurück in m_data willst
+    }
 
 private:
-  PGMImage::Sample getPrediction( const PGMImage::Sample* line, int x, int y ) const
-  {
-    PGMImage::Sample X = ( x > 0 ? line[x-1] : y > 0 ? line[x-m_width]   : 128 ); // fallback
-    PGMImage::Sample L = ( x > 0                     ? line[x-1]         : X );
-    PGMImage::Sample A = ( y > 0                     ? line[x-m_width]   : X );
-    PGMImage::Sample C = ( x > 0 && y > 0            ? line[x-m_width-1]   : X );
-    if (C >= std::max(L, A))
-        return std::min(L, A);
-    else if (C <= std::min(L, A))
-        return std::max(L, A);
-    else
-        return L + A - C;
-  }
+    // ------------------------------
+    // Median Predictor + Context
+    // ------------------------------
+    PGMImage::Sample getPrediction(const PGMImage::Sample* data, int x, int y, int& ctx)
+    {
+        // Hilfsfunktion: clamp auf gültige Koordinaten (Randbehandlung)
+        auto get = [&](int xx, int yy) -> PGMImage::Sample {
+            if (xx < 0) xx = 0;
+            if (yy < 0) yy = 0;
+            if (xx >= m_width) xx = m_width - 1;
+            if (yy >= m_height) yy = m_height - 1;
+            return data[yy * m_width + xx];
+        };
+
+        PGMImage::Sample A = get(x - 1, y);     // links
+        PGMImage::Sample B = get(x, y - 1);     // oben
+        PGMImage::Sample C = get(x - 1, y - 1); // oben-links
+        PGMImage::Sample D = get(x + 1, y - 1); // oben-rechts
+
+        ctx = computeContext(A, B, C, D);
+        size_t ctxIdx = static_cast<size_t>(std::clamp(std::abs(ctx), 0, static_cast<int>(m_ctxs.size() - 1)));
+        Context& c = m_ctxs[ctxIdx];
+
+        // LOCO-I Median Predictor
+        int pred;
+        if (C >= std::max(A, B))
+            pred = std::min(A, B);
+        else if (C <= std::min(A, B))
+            pred = std::max(A, B);
+        else
+            pred = A + B - C;
+
+        int corr = c.C;
+        if (ctx < 0) pred -= corr;
+        else pred += corr;
+
+        return static_cast<PGMImage::Sample>(std::clamp(pred, 0, 255));
+    }
+
+    // ------------------------------
+    // Gradient Quantisierung
+    // ------------------------------
+    inline int quantize(int g) const
+    {
+        const int T1 = 3, T2 = 7, T3 = 21;
+        if (g <= -T3) return -4;
+        if (g <= -T2) return -3;
+        if (g <= -T1) return -2;
+        if (g < 0) return -1;
+        if (g == 0) return 0;
+        if (g < T1) return 1;
+        if (g < T2) return 2;
+        if (g < T3) return 3;
+        return 4;
+    }
+
+    // ------------------------------
+    // Contextnummer berechnen
+    // ------------------------------
+    inline int computeContext(PGMImage::Sample A, PGMImage::Sample B, PGMImage::Sample C, PGMImage::Sample D)
+    {
+        int g1 = D - B;
+        int g2 = B - C;
+        int g3 = C - A; // korrigiert
+
+        int q1 = quantize(g1);
+        int q2 = quantize(g2);
+        int q3 = quantize(g3);
+
+        int sign = 1;
+        if (q1 < 0) sign = -1;
+        else if (q1 == 0 && q2 < 0) sign = -1;
+        else if (q1 == 0 && q2 == 0 && q3 < 0) sign = -1;
+
+        if (sign < 0) { q1 = -q1; q2 = -q2; q3 = -q3; }
+
+        int idx = (q1 + 4) * 81 + (q2 + 4) * 9 + (q3 + 4);
+        return (sign < 0) ? -idx : idx;
+    }
+
+    // ------------------------------
+    // Kontext aktualisieren
+    // ------------------------------
+    inline void updateContext(int ctxId, int e)
+    {
+        if (ctxId == 0) return;
+
+        size_t idx = static_cast<size_t>(std::clamp(std::abs(ctxId), 0, static_cast<int>(m_ctxs.size() - 1)));
+        Context& ctx = m_ctxs[idx];
+
+        ctx.B += e;
+        ctx.N += 1;
+
+        if (ctx.B <= -ctx.N)
+        {
+            ctx.C -= 1;
+            ctx.B += ctx.N;
+            if (ctx.B <= -ctx.N) ctx.B = -ctx.N + 1;
+        }
+        else if (ctx.B > 0)
+        {
+            ctx.C += 1;
+            ctx.B -= ctx.N;
+            if (ctx.B > 0) ctx.B = 0;
+        }
+
+        if (ctx.N >= 64)
+        {
+            ctx.N >>= 1;
+            ctx.B >>= 1;
+        }
+    }
+
+    // ------------------------------
+    // Kontextstruktur
+    // ------------------------------
+    struct Context
+    {
+        int B = 0;
+        int N = 1;
+        int C = 0;
+    };
 
 private:
-  int                             m_width;
-  int                             m_height;
-  std::vector<PGMImage::Sample>&  m_data;
-  std::vector<PGMImage::Sample>   m_org;
+    const int a = 256;
+    int m_width;
+    int m_height;
+
+    std::vector<PGMImage::Sample>& m_data;
+    std::vector<PGMImage::Sample> m_org;
+
+    std::vector<Context> m_ctxs;
 };
 
 
@@ -224,8 +379,10 @@ private:
 //======================================================
 void encode( const std::string& inname, const std::string& outname )
 {
+
   // read original image
   PGMImage img;
+
   img.read( inname );
 
   // create bitstream + write header
@@ -234,14 +391,20 @@ void encode( const std::string& inname, const std::string& outname )
   assert( stream.good() );
   bs.addFixed<unsigned>( img.getWidth(),  16 );
   bs.addFixed<unsigned>( img.getHeight(), 16 );
-
+  
   // code image block by block
   EntropyEncoder  eenc( bs );
   Prediction      pred( img.getWidth(), img.getHeight(), img.getData() );
 
   // apply prediction
   pred.subtractPrediction();
-
+  {
+    std::ofstream residFile("residues.txt");
+    PGMImage::Sample* data = img.getData().data();
+    for (int k = 0; k < img.getSize(); k++) {
+        residFile << int(data[k]) << "\n";  // int cast für negative Werte
+    }
+}
   // encode prediction error signal
   PGMImage::Sample* data = img.getData().data();
   for( int k = 0; k < img.getSize(); k++ )
@@ -304,56 +467,70 @@ void decode( const std::string& inname, const std::string& outname )
 namespace fs = std::filesystem;
 
 int main() {
-    std::string inputFolder = "kodak-pgm";
+    std::string inputFolder  = "kodak-pgm";
     std::string outputFolder = "output";
 
-    std::cout << fs::current_path() << std::endl;
-    std::ofstream report("bitrates.txt", std::ios::out);
-    if (!report.is_open()) {
-        std::cerr << "Fehler: Konnte bitrates.txt nicht öffnen!" << std::endl;
+    // Aktuelles Arbeitsverzeichnis ausgeben
+    std::cout << "Current path: " << fs::current_path() << std::endl;
+
+    // Prüfen, ob Input-Ordner existiert
+    if (!fs::exists(inputFolder) || !fs::is_directory(inputFolder)) {
+        std::cerr << "Fehler: Input-Ordner \"" << inputFolder << "\" existiert nicht!" << std::endl;
         return 1;
     }
 
-    // sicherstellen, dass der Output-Ordner existiert
+    // Output-Ordner erstellen, falls nicht vorhanden
     fs::create_directories(outputFolder);
 
-    // durch alle Dateien im Eingabeordner gehen
+    // Bitraten-Datei öffnen
+    std::ofstream report(outputFolder + "/bitrates.txt", std::ios::out);
+    if (!report.is_open()) {
+        std::cerr << "Fehler: Konnte bitrates.txt nicht erstellen!" << std::endl;
+        return 1;
+    }
+
+    int fileCount = 0;
+
+    // Alle PGM-Dateien im Input-Ordner verarbeiten
     for (const auto& entry : fs::directory_iterator(inputFolder)) {
         if (entry.path().extension() == ".pgm") {
+            fileCount++;
             std::string inputFile = entry.path().string();
+            std::string baseName  = entry.path().stem().string();
 
-            // Name ohne Endung:
-            std::string baseName = entry.path().stem().string();
-
-            // Ausgabe-Dateinamen
             std::string encodedFile = outputFolder + "/" + baseName + ".bin";
             std::string decodedFile = outputFolder + "/" + baseName + "_decoded.pgm";
 
+            std::cout << "=== " << baseName << " ===" << std::endl;
+
+            // Encoding
             std::cout << "Encoding " << inputFile << " -> " << encodedFile << std::endl;
             encode(inputFile, encodedFile);
-
+            std::cout << "Tests ";
+            // Bitrate berechnen
             uintmax_t fileSize = fs::file_size(encodedFile);
             PGMImage img;
             img.read(inputFile);
-            size_t numPixels = img.getSize();
-            double bitrate = (fileSize * 8.0) / numPixels;
-                    
-            // Ausgabe in Konsole
-            std::cout << baseName << ": Bitrate = " 
-                      << std::fixed << std::setprecision(3) 
+            double bitrate = (fileSize * 8.0) / img.getSize();
+
+            std::cout << "Bitrate: " << std::fixed << std::setprecision(3) 
                       << bitrate << " bpp" << std::endl;
-                    
-            // Ausgabe in Datei
             report << baseName << ": " << std::fixed << std::setprecision(3) 
                    << bitrate << " bpp" << std::endl;
 
-
-
+            // Decoding
             std::cout << "Decoding " << encodedFile << " -> " << decodedFile << std::endl;
             decode(encodedFile, decodedFile);
+
+            std::cout << std::endl;
         }
     }
 
-    std::cout << "Fertig!" << std::endl;
+    if (fileCount == 0) {
+        std::cout << "Keine .pgm-Dateien im Ordner \"" << inputFolder << "\" gefunden!" << std::endl;
+    } else {
+        std::cout << "Fertig! " << fileCount << " Dateien verarbeitet." << std::endl;
+    }
+
     return 0;
 }
