@@ -165,7 +165,12 @@ PGMImage::Sample EntropyDecoder::decodeSample()
 
 //======================================================
 //
-//   LOCO-I PREDICTOR (JPEG-LS)
+//   LOCO-I PREDICTOR (JPEG-LS) - KORRIGIERTE IMPLEMENTIERUNG
+//
+//======================================================
+//======================================================
+//
+//   LOCO-I PREDICTOR MIT DIAGNOSE
 //
 //======================================================
 class Prediction
@@ -174,73 +179,119 @@ public:
     Prediction(int width, int height, std::vector<PGMImage::Sample>& img)
         : m_width(width), m_height(height), m_data(img), m_org(m_data)
     {
-        m_ctxs.resize(365); // 9^3 = 729 / 2 (für Vorzeichen) → 365 Kontexte
+        m_ctxs.resize(365);
+        
+        for (auto& ctx : m_ctxs) {
+            ctx.N = 1;
+            ctx.A = std::max(2, (width * height + 32) / 64);
+            ctx.B = 0;
+            ctx.C = 0;
+        }
+        
+        // Diagnose-Zähler
+        bias_used = 0;
+        total_pixels = 0;
     }
 
-    // ------------------------------
-    // Subtract prediction (encoding)
-    // ------------------------------
     void subtractPrediction()
     {
         const PGMImage::Sample* orgData = m_org.data();
         PGMImage::Sample* data = m_data.data();
-
+        
+        // Residuen-Statistiken
+        int zero_residuals = 0;
+        int small_residuals = 0;
+        
         for (int y = 0; y < m_height; ++y)
         {
             for (int x = 0; x < m_width; ++x)
             {
-                int ctx;
-                int pred = getPrediction(orgData, x, y, ctx);
-
-                int e = int(orgData[y * m_width + x]) - pred;
-                if (ctx < 0) e = -e;
-
-                // modulo correction for residuals
-                int halfA = a / 2;
-                e = ((e + halfA) % a) - halfA;
-
-                data[y * m_width + x] = static_cast<PGMImage::Sample>(std::clamp(e, -128, 127));
-
-                updateContext(ctx, e);
+                total_pixels++;
+                
+                int ctxIdx;
+                int sign;
+                int fixedPred = getFixedPrediction(orgData, x, y);
+                int correctedPred = applyBiasCorrection(fixedPred, orgData, x, y, ctxIdx, sign);
+                
+                // Diagnose: Wie oft wird Bias tatsächlich angewendet?
+                if (std::abs(correctedPred - fixedPred) > 0) {
+                    bias_used++;
+                }
+                
+                int actual = orgData[y * m_width + x];
+                int error = actual - correctedPred;
+                
+                if (sign < 0) error = -error;
+                error = moduloCorrection(error);
+                
+                // Residuen-Statistiken
+                if (error == 0) zero_residuals++;
+                if (std::abs(error) <= 1) small_residuals++;
+                
+                data[y * m_width + x] = static_cast<PGMImage::Sample>(std::clamp(error, -128, 127));
+                updateContext(ctxIdx, error);
             }
         }
+        
+        // Ausgabe der Diagnose
+        std::cout << "Bias-Korrektur verwendet: " << bias_used << "/" << total_pixels 
+                  << " (" << (100.0 * bias_used / total_pixels) << "%)" << std::endl;
+        std::cout << "Null-Residuen: " << zero_residuals << "/" << total_pixels 
+                  << " (" << (100.0 * zero_residuals / total_pixels) << "%)" << std::endl;
+        std::cout << "Kleine Residuen (|e|<=1): " << small_residuals << "/" << total_pixels 
+                  << " (" << (100.0 * small_residuals / total_pixels) << "%)" << std::endl;
     }
 
     // ------------------------------
-    // Add prediction (decoding)
+    // Prädiktion addieren (Decoding)
     // ------------------------------
     void addPrediction()
     {
         PGMImage::Sample* recData = m_org.data();
         const PGMImage::Sample* data = m_data.data();
-
+    
         for (int y = 0; y < m_height; ++y)
         {
             for (int x = 0; x < m_width; ++x)
             {
-                int ctx;
-                int pred = getPrediction(recData, x, y, ctx); // auf rekonstruierten Nachbarn
-
-                int e = int(data[y * m_width + x]);
-                if (ctx < 0) e = -e;
-
-                int val = (pred + e + a) % a;
+                int ctxIdx;
+                int sign;
+                
+                // Feste Prädiktion auf REKONSTRUIERTEN Daten
+                int fixedPred = getFixedPrediction(recData, x, y);
+                
+                // Kontext-basierte adaptive Korrektur
+                int correctedPred = applyBiasCorrection(fixedPred, recData, x, y, ctxIdx, sign);
+                
+                // Fehlerwert aus Daten
+                int error = data[y * m_width + x];
+                
+                // Vorzeichen anpassen basierend auf Kontext-Sign
+                if (sign < 0) error = -error;
+                
+                // Rekonstruierten Wert berechnen
+                int val = correctedPred + error;
+                
+                // Modulo-Korrektur rückgängig machen
+                if (val < 0) val += m_alphabetSize;
+                if (val >= m_alphabetSize) val -= m_alphabetSize;
+                
                 recData[y * m_width + x] = static_cast<PGMImage::Sample>(std::clamp(val, 0, 255));
-
-                updateContext(ctx, e); // wichtig: hier den Fehlerwert verwenden
+                
+                // Kontext aktualisieren
+                updateContext(ctxIdx, error);
             }
         }
-
-        m_data = m_org; // optional, falls du rekonstruiertes Bild zurück in m_data willst
+      
+        m_data = m_org; // Rekonstruierte Daten zurückkopieren
     }
 
 private:
     // ------------------------------
-    // Median Predictor + Context
+    // Feste MED-Prädiktion (Median Edge Detector)
     // ------------------------------
-    PGMImage::Sample getPrediction(const PGMImage::Sample* data, int x, int y, int& ctx)
+    int getFixedPrediction(const PGMImage::Sample* data, int x, int y) const
     {
-        // Hilfsfunktion: clamp auf gültige Koordinaten (Randbehandlung)
         auto get = [&](int xx, int yy) -> PGMImage::Sample {
             if (xx < 0) xx = 0;
             if (yy < 0) yy = 0;
@@ -248,30 +299,41 @@ private:
             if (yy >= m_height) yy = m_height - 1;
             return data[yy * m_width + xx];
         };
-
-        PGMImage::Sample A = get(x - 1, y);     // links
-        PGMImage::Sample B = get(x, y - 1);     // oben
-        PGMImage::Sample C = get(x - 1, y - 1); // oben-links
-        PGMImage::Sample D = get(x + 1, y - 1); // oben-rechts
-
-        ctx = computeContext(A, B, C, D);
-        size_t ctxIdx = static_cast<size_t>(std::clamp(std::abs(ctx), 0, static_cast<int>(m_ctxs.size() - 1)));
-        Context& c = m_ctxs[ctxIdx];
-
-        // LOCO-I Median Predictor
-        int pred;
-        if (C >= std::max(A, B))
-            pred = std::min(A, B);
-        else if (C <= std::min(A, B))
-            pred = std::max(A, B);
+      
+        PGMImage::Sample sample_a = get(x - 1, y);     // links
+        PGMImage::Sample sample_b = get(x, y - 1);     // oben  
+        PGMImage::Sample sample_c = get(x - 1, y - 1); // oben-links
+        
+        // LOCO-I Median Predictor (MED) - KORREKTE IMPLEMENTIERUNG
+        if (sample_c >= std::max(sample_a, sample_b))
+            return std::min(sample_a, sample_b);
+        else if (sample_c <= std::min(sample_a, sample_b))
+            return std::max(sample_a, sample_b);
         else
-            pred = A + B - C;
+            return sample_a + sample_b - sample_c;
+    }
 
-        int corr = c.C;
-        if (ctx < 0) pred -= corr;
-        else pred += corr;
-
-        return static_cast<PGMImage::Sample>(std::clamp(pred, 0, 255));
+    // ------------------------------
+    // Bias-Korrektur anwenden
+    // ------------------------------
+    int applyBiasCorrection(int fixedPred, const PGMImage::Sample* data, int x, int y, 
+                           int& ctxIndex, int& sign)
+    {
+        // Kontext berechnen
+        ctxIndex = computeContext(data, x, y, sign);
+        
+        // Sicherstellen, dass Kontext-Index gültig ist
+        size_t idx = static_cast<size_t>(std::clamp(ctxIndex, 0, static_cast<int>(m_ctxs.size() - 1)));
+        Context& ctx = m_ctxs[idx];
+        
+        // Korrigierte Prädiktion - WICHTIG: C-Wert verwenden
+        int correctedPred = fixedPred;
+        if (sign > 0) 
+            correctedPred += ctx.C;
+        else 
+            correctedPred -= ctx.C;
+        
+        return std::clamp(correctedPred, 0, 255);
     }
 
     // ------------------------------
@@ -280,6 +342,8 @@ private:
     inline int quantize(int g) const
     {
         const int T1 = 3, T2 = 7, T3 = 21;
+        g = std::clamp(g, -255, 255);
+        
         if (g <= -T3) return -4;
         if (g <= -T2) return -3;
         if (g <= -T1) return -2;
@@ -292,60 +356,99 @@ private:
     }
 
     // ------------------------------
-    // Contextnummer berechnen
+    // Kontext berechnen
     // ------------------------------
-    inline int computeContext(PGMImage::Sample A, PGMImage::Sample B, PGMImage::Sample C, PGMImage::Sample D)
+    inline int computeContext(const PGMImage::Sample* data, int x, int y, int& sign)
     {
-        int g1 = D - B;
-        int g2 = B - C;
-        int g3 = C - A; // korrigiert
-
+        auto get = [&](int xx, int yy) -> PGMImage::Sample {
+            if (xx < 0) xx = 0;
+            if (yy < 0) yy = 0;
+            if (xx >= m_width) xx = m_width - 1;
+            if (yy >= m_height) yy = m_height - 1;
+            return data[yy * m_width + xx];
+        };
+        
+        PGMImage::Sample sample_a = get(x - 1, y);     // links
+        PGMImage::Sample sample_b = get(x, y - 1);     // oben
+        PGMImage::Sample sample_c = get(x - 1, y - 1); // oben-links
+        PGMImage::Sample sample_d = get(x + 1, y - 1); // oben-rechts
+        
+        // Gradienten berechnen
+        int g1 = int(sample_d) - int(sample_b);
+        int g2 = int(sample_b) - int(sample_c);
+        int g3 = int(sample_c) - int(sample_a);
+        
+        // Gradienten quantisieren
         int q1 = quantize(g1);
         int q2 = quantize(g2);
         int q3 = quantize(g3);
-
-        int sign = 1;
+        
+        // Sign bestimmen (erste nicht-Null Komponente)
+        sign = 1;
         if (q1 < 0) sign = -1;
         else if (q1 == 0 && q2 < 0) sign = -1;
         else if (q1 == 0 && q2 == 0 && q3 < 0) sign = -1;
-
-        if (sign < 0) { q1 = -q1; q2 = -q2; q3 = -q3; }
-
+        
+        // Für negative Sign, Vorzeichen umkehren
+        if (sign < 0) {
+            q1 = -q1;
+            q2 = -q2; 
+            q3 = -q3;
+        }
+        
+        // Kontext-Index berechnen (1..364)
         int idx = (q1 + 4) * 81 + (q2 + 4) * 9 + (q3 + 4);
-        return (sign < 0) ? -idx : idx;
+        int ctxIndex = (idx / 2) + 1;
+        
+        return std::clamp(ctxIndex, 1, 364);
+    }
+
+    // ------------------------------
+    // Modulo-Korrektur für Residuen
+    // ------------------------------
+    inline int moduloCorrection(int error) const
+    {
+        const int halfA = m_alphabetSize / 2;
+        error = ((error + halfA) % m_alphabetSize) - halfA;
+        if (error < -halfA) error += m_alphabetSize;
+        return error;
     }
 
     // ------------------------------
     // Kontext aktualisieren
     // ------------------------------
-    inline void updateContext(int ctxId, int e)
+    inline void updateContext(int ctxIdx, int error)
     {
-        if (ctxId == 0) return;
-
-        size_t idx = static_cast<size_t>(std::clamp(std::abs(ctxId), 0, static_cast<int>(m_ctxs.size() - 1)));
+        if (ctxIdx == 0) return;
+        
+        size_t idx = static_cast<size_t>(std::clamp(ctxIdx, 0, static_cast<int>(m_ctxs.size() - 1)));
         Context& ctx = m_ctxs[idx];
-
-        ctx.B += e;
+        
+        // Zähler aktualisieren
+        ctx.B += error;
+        ctx.A += std::abs(error);
         ctx.N += 1;
-
-        if (ctx.B <= -ctx.N)
-        {
+        
+        // Bias-Korrektur (C) aktualisieren
+        if (ctx.B <= -ctx.N) {
             ctx.C -= 1;
             ctx.B += ctx.N;
             if (ctx.B <= -ctx.N) ctx.B = -ctx.N + 1;
-        }
-        else if (ctx.B > 0)
-        {
+        } else if (ctx.B > 0) {
             ctx.C += 1;
             ctx.B -= ctx.N;
             if (ctx.B > 0) ctx.B = 0;
         }
-
-        if (ctx.N >= 64)
-        {
+        
+        // Periodisches Zurücksetzen (Reset)
+        if (ctx.N >= 64) {
             ctx.N >>= 1;
             ctx.B >>= 1;
+            ctx.A >>= 1;
         }
+        
+        // Sicherstellen, dass C im gültigen Bereich bleibt
+        ctx.C = std::clamp(ctx.C, -128, 127);
     }
 
     // ------------------------------
@@ -353,13 +456,16 @@ private:
     // ------------------------------
     struct Context
     {
-        int B = 0;
-        int N = 1;
-        int C = 0;
+        int A = 0; // Kumulierte Summe der absoluten Fehler
+        int B = 0; // Kumulierte Summe der Fehler (für Bias-Korrektur)
+        int N = 1; // Anzahl der Kontext-Vorkommen
+        int C = 0; // Bias-Korrekturwert
     };
-
 private:
-    const int a = 256;
+    // Diagnose-Variablen
+    int bias_used;
+    int total_pixels;
+    const int m_alphabetSize = 256;
     int m_width;
     int m_height;
 
@@ -371,48 +477,36 @@ private:
 
 
 
-
 //======================================================
 //
-//   M A I N    E N C O D I N G   +   D E C O D I N G
+//   M A I N ENCODING + DECODING
 //
 //======================================================
-void encode( const std::string& inname, const std::string& outname )
+void encode(const std::string& inname, const std::string& outname)
 {
+    PGMImage img;
+    img.read(inname);
 
-  // read original image
-  PGMImage img;
+    std::ofstream stream(outname, std::ios::out | std::ios::binary);
+    OBitstream bs(stream);
 
-  img.read( inname );
+    bs.addFixed<unsigned>(img.getWidth(), 16);
+    bs.addFixed<unsigned>(img.getHeight(), 16);
+    
+    EntropyEncoder eenc(bs);
+    Prediction pred(img.getWidth(), img.getHeight(), img.getData());
 
-  // create bitstream + write header
-  std::ofstream stream( outname, std::ios::out|std::ios::binary );
-  OBitstream    bs( stream );
-  assert( stream.good() );
-  bs.addFixed<unsigned>( img.getWidth(),  16 );
-  bs.addFixed<unsigned>( img.getHeight(), 16 );
-  
-  // code image block by block
-  EntropyEncoder  eenc( bs );
-  Prediction      pred( img.getWidth(), img.getHeight(), img.getData() );
-
-  // apply prediction
-  pred.subtractPrediction();
-  {
-    std::ofstream residFile("residues.txt");
+    // Prädiktion anwenden
+    pred.subtractPrediction();
+    
+    // Residuen codieren
     PGMImage::Sample* data = img.getData().data();
     for (int k = 0; k < img.getSize(); k++) {
-        residFile << int(data[k]) << "\n";  // int cast für negative Werte
+        eenc.encodeSample(data[k]);
     }
-}
-  // encode prediction error signal
-  PGMImage::Sample* data = img.getData().data();
-  for( int k = 0; k < img.getSize(); k++ )
-    eenc.encodeSample( data[k] );
-  eenc.finish();
+    eenc.finish();
 
-  bs.byteAlign();
-  assert( stream.good() );
+    bs.byteAlign();
 }
 
 
@@ -442,28 +536,6 @@ void decode( const std::string& inname, const std::string& outname )
   img.write( outname );
 }
 
-
-
-
-
-//======================================================
-//
-//   M A I N
-//
-//======================================================
-//int main( int argc, char** argv )
-//{
-//  cmdPars pars;
-//  if( !readCmdLine( argc, argv, pars ) )
-//    return 1;
-//
-//  if( pars.decode )
-//    decode( pars.inname, pars.outname );
-//  else
-//    encode( pars.inname, pars.outname );
-//
-//  return 0;
-//}
 namespace fs = std::filesystem;
 
 int main() {
