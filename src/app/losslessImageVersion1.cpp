@@ -1,4 +1,3 @@
-
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -85,6 +84,7 @@ bool readCmdLine( int argc, char** argv, cmdPars& pars )
 
 
 
+
 //======================================================
 //
 //   E N T R O P Y   C O D I N G
@@ -163,6 +163,7 @@ PGMImage::Sample EntropyDecoder::decodeSample()
 
 
 
+
 //======================================================
 //
 //   LOCO-I PREDICTOR (JPEG-LS) - KORRIGIERTE IMPLEMENTIERUNG
@@ -191,6 +192,7 @@ public:
         // Diagnose-Zähler
         bias_used = 0;
         total_pixels = 0;
+        
     }
 
     void subtractPrediction()
@@ -198,9 +200,10 @@ public:
         const PGMImage::Sample* orgData = m_org.data();
         PGMImage::Sample* data = m_data.data();
         
-        // Residuen-Statistiken
         int zero_residuals = 0;
         int small_residuals = 0;
+        int dbg_count = 0;
+        constexpr int DBG_PRINT_PIXELS = 16; // Weniger für Übersichtlichkeit
         
         for (int y = 0; y < m_height; ++y)
         {
@@ -208,228 +211,278 @@ public:
             {
                 total_pixels++;
                 
-                int ctxIdx;
-                int sign;
-                int fixedPred = getFixedPrediction(orgData, x, y);
-                int correctedPred = applyBiasCorrection(fixedPred, orgData, x, y, ctxIdx, sign);
+                // STEP 0: Nachbarwerte laden (Rand = 0)
+                auto get = [&](int xx, int yy) -> int {
+                    if (xx < 0 || yy < 0) return 0;
+                    if (xx >= m_width || yy >= m_height) return 0;
+                    return int(orgData[yy * m_width + xx]);
+                };
                 
-                // Diagnose: Wie oft wird Bias tatsächlich angewendet?
-                if (std::abs(correctedPred - fixedPred) > 0) {
+                int a = get(x - 1, y);     // left
+                int b = get(x,     y - 1); // up
+                int c = get(x - 1, y - 1); // up-left
+                int d = get(x + 1, y - 1); // up-right
+                
+                // STEP 1: Lokale Gradienten berechnen
+                int g1 = d - b;  // db
+                int g2 = b - c;  // bc
+                int g3 = c - a;  // ca
+                
+                // STEP 2: Check für Run-Mode (alle Gradienten = 0?)
+                // Für diese Implementierung: Wir behandeln alle Pixel im "regular mode"
+                // (Run-Mode Implementation wäre optional)
+                
+                // STEP 3 + 4: Gradienten quantisieren und Kontext bestimmen
+                int q1 = quantize(g1);
+                int q2 = quantize(g2);
+                int q3 = quantize(g3);
+                
+                // Vorzeichen bestimmen (erste nicht-Null Komponente)
+                int sign = 1;
+                if (q1 < 0) sign = -1;
+                else if (q1 == 0 && q2 < 0) sign = -1;
+                else if (q1 == 0 && q2 == 0 && q3 < 0) sign = -1;
+                
+                // Gradienten normalisieren für Kontext-Index
+                int q1_norm = q1, q2_norm = q2, q3_norm = q3;
+                if (sign < 0) {
+                    q1_norm = -q1;
+                    q2_norm = -q2;
+                    q3_norm = -q3;
+                }
+                
+                // Kontext-Index berechnen (1..364)
+                int ctxIdx = (q1_norm) * 25 + (q2_norm) * 5 + (q3_norm);
+                ctxIdx = std::clamp(ctxIdx, 0, 364);
+                if (ctxIdx == 0) ctxIdx = 1;
+
+                size_t safeIdx = static_cast<size_t>(ctxIdx);
+                Context& ctx = m_ctxs[safeIdx];
+                
+                // STEP 5: Feste MED-Prädiktion berechnen
+                int pred_med;
+                if (c >= std::max(a, b))
+                    pred_med = std::min(a, b);
+                else if (c <= std::min(a, b))
+                    pred_med = std::max(a, b);
+                else
+                    pred_med = a + b - c;
+                
+                // STEP 6: Adaptive Korrektur anwenden
+                int pred_corr = pred_med;
+                if (sign > 0)
+                    pred_corr += ctx.C;
+                else
+                    pred_corr -= ctx.C;
+                pred_corr = std::clamp(pred_corr, 0, 255);
+                
+                if (std::abs(pred_corr - pred_med) > 0) {
                     bias_used++;
                 }
                 
-                int actual = orgData[y * m_width + x];
-                int error = actual - correctedPred;
+                // STEP 7: Residuum berechnen
+                int actual = int(orgData[y * m_width + x]);
+
+                int error = actual - pred_corr;
                 
-                if (sign < 0) error = -error;
-                error = moduloCorrection(error);
+                // Negatives Vorzeichen anwenden falls nötig
+                if (sign < 0)
+                    error = -error;
+                
+                // Modulo-Reduktion auf [-128, 127]
+                int error_mod = error;
+                while (error_mod > 127) error_mod -= 256;
+                while (error_mod < -128) error_mod += 256;
+                
+                // STEP 8-10: Golomb Parameter k (nicht implementiert, verwende nur error_mod)
+                // Hier würde Golomb-Codierung folgen
+                
+                // Speichern des Residuums
+                data[y * m_width + x] = static_cast<PGMImage::Sample>(std::clamp(error_mod, -128, 127));
                 
                 // Residuen-Statistiken
-                if (error == 0) zero_residuals++;
-                if (std::abs(error) <= 1) small_residuals++;
+                if (error_mod == 0) zero_residuals++;
+                if (std::abs(error_mod) <= 1) small_residuals++;
                 
-                data[y * m_width + x] = static_cast<PGMImage::Sample>(std::clamp(error, -128, 127));
-                updateContext(ctxIdx, error);
+                // Debug-Ausgabe
+                if (dbg_count < DBG_PRINT_PIXELS) {
+                    std::cout << "[DBG SUB] idx=" << (y*m_width + x)
+                              << " (" << x << "," << y << ")"
+                              << " [a,b,c,d]=[" << a << "," << b << "," << c << "," << d << "]"
+                              << " grads={" << g1 << "," << g2 << "," << g3 << "}"
+                              << " q={" << q1 << "," << q2 << "," << q3 << "}"
+                              << " sign=" << sign
+                              << " pred_med=" << pred_med
+                              << " pred_corr=" << pred_corr
+                              << " actual=" << actual
+                              << " error=" << error
+                              << " error_mod=" << error_mod
+                              << " ctx=" << ctxIdx
+                              << " ctx(A,B,N,C)=(" << ctx.A << "," << ctx.B << "," << ctx.N << "," << ctx.C << ")"
+                              << std::endl;
+                    ++dbg_count;
+                }
+                if (dbg_count < DBG_PRINT_PIXELS) std::cout << "ctxIdx: " << ctxIdx << "error" << error << std::endl;
+                // STEP 11-12: Context-Zähler aktualisieren
+                updateContextLocoI(ctxIdx, error);
             }
         }
-        
-        // Ausgabe der Diagnose
-        std::cout << "Bias-Korrektur verwendet: " << bias_used << "/" << total_pixels 
-                  << " (" << (100.0 * bias_used / total_pixels) << "%)" << std::endl;
-        std::cout << "Null-Residuen: " << zero_residuals << "/" << total_pixels 
-                  << " (" << (100.0 * zero_residuals / total_pixels) << "%)" << std::endl;
-        std::cout << "Kleine Residuen (|e|<=1): " << small_residuals << "/" << total_pixels 
-                  << " (" << (100.0 * small_residuals / total_pixels) << "%)" << std::endl;
+
+        std::cout << "\n=== SUBTRACTPREDICTION SUMMARY ===\n"
+                  << "Total pixels: " << total_pixels << "\n"
+                  << "Bias corrections: " << bias_used << " (" << (100.0*bias_used/total_pixels) << "%)\n"
+                  << "Zero residuals: " << zero_residuals << " (" << (100.0*zero_residuals/total_pixels) << "%)\n"
+                  << "Small residuals (|e|<=1): " << small_residuals << " (" << (100.0*small_residuals/total_pixels) << "%)\n"
+                  << std::endl;
     }
 
-    // ------------------------------
-    // Prädiktion addieren (Decoding)
-    // ------------------------------
-    void addPrediction()
-    {
-        PGMImage::Sample* recData = m_org.data();
-        const PGMImage::Sample* data = m_data.data();
+void addPrediction()
+{
+    //PGMImage::Sample* recData = m_data.data(); // Verwende die Residuumsdaten als Basis
+    const PGMImage::Sample* residualData = m_data.data(); // Residuen-Daten
     
-        for (int y = 0; y < m_height; ++y)
+    int dbg_count = 0;
+    constexpr int DBG_PRINT_PIXELS = 16;
+
+    // Temporären Puffer für rekonstruierte Daten erstellen
+    std::vector<PGMImage::Sample> tempData(m_data.size());
+    
+    for (int y = 0; y < m_height; ++y)
+    {
+        for (int x = 0; x < m_width; ++x)
         {
-            for (int x = 0; x < m_width; ++x)
-            {
-                int ctxIdx;
-                int sign;
-                
-                // Feste Prädiktion auf REKONSTRUIERTEN Daten
-                int fixedPred = getFixedPrediction(recData, x, y);
-                
-                // Kontext-basierte adaptive Korrektur
-                int correctedPred = applyBiasCorrection(fixedPred, recData, x, y, ctxIdx, sign);
-                
-                // Fehlerwert aus Daten
-                int error = data[y * m_width + x];
-                
-                // Vorzeichen anpassen basierend auf Kontext-Sign
-                if (sign < 0) error = -error;
-                
-                // Rekonstruierten Wert berechnen
-                int val = correctedPred + error;
-                
-                // Modulo-Korrektur rückgängig machen
-                if (val < 0) val += m_alphabetSize;
-                if (val >= m_alphabetSize) val -= m_alphabetSize;
-                
-                recData[y * m_width + x] = static_cast<PGMImage::Sample>(std::clamp(val, 0, 255));
-                
-                // Kontext aktualisieren
-                updateContext(ctxIdx, error);
+            // WICHTIG: Für Prädiktion die bereits rekonstruierten Nachbarn verwenden
+            auto get = [&](int xx, int yy) -> int {
+                if (xx < 0 || yy < 0) return 0;
+                if (xx >= m_width || yy >= m_height) return 0;
+                // Verwende tempData für bereits rekonstruierte Pixel
+                return int(tempData[yy * m_width + xx]);
+            };
+            
+            int a = get(x - 1, y);     // left
+            int b = get(x,     y - 1); // up
+            int c = get(x - 1, y - 1); // up-left
+            int d = get(x + 1, y - 1); // up-right
+            
+            // STEP 1: Lokale Gradienten berechnen
+            int g1 = d - b;
+            int g2 = b - c;
+            int g3 = c - a;
+            
+            // STEP 3 + 4: Gradienten quantisieren und Kontext bestimmen
+            int q1 = quantize(g1);
+            int q2 = quantize(g2);
+            int q3 = quantize(g3);
+            
+            // Vorzeichen bestimmen
+            int sign = 1;
+            if (q1 < 0) sign = -1;
+            else if (q1 == 0 && q2 < 0) sign = -1;
+            else if (q1 == 0 && q2 == 0 && q3 < 0) sign = -1;
+            
+            // Gradienten normalisieren für Kontext-Index
+            int q1_norm = q1, q2_norm = q2, q3_norm = q3;
+            if (sign < 0) {
+                q1_norm = -q1;
+                q2_norm = -q2;
+                q3_norm = -q3;
             }
+            
+            // Kontext-Index berechnen
+            int ctxIdx = (q1_norm) * 25 + (q2_norm) * 5 + (q3_norm);
+            ctxIdx = std::clamp(ctxIdx, 0, 364);
+            if (ctxIdx == 0) ctxIdx = 1;
+
+            size_t safeIdx = static_cast<size_t>(ctxIdx);
+            Context& ctx = m_ctxs[safeIdx];
+            
+            // STEP 5: Feste MED-Prädiktion berechnen
+            int pred_med;
+            if (c >= std::max(a, b))
+                pred_med = std::min(a, b);
+            else if (c <= std::min(a, b))
+                pred_med = std::max(a, b);
+            else
+                pred_med = a + b - c;
+            
+            // STEP 6: Adaptive Korrektur anwenden
+            int pred_corr = pred_med;
+            if (sign > 0)
+                pred_corr += ctx.C;
+            else
+                pred_corr -= ctx.C;
+            pred_corr = std::clamp(pred_corr, 0, 255);
+            
+            // STEP 7: Residuum aus den decodierten Daten laden
+            int error_stored = int(residualData[y * m_width + x]);
+            
+            // Negatives Vorzeichen anwenden falls nötig
+            int error = error_stored;
+            if (sign < 0)
+                error = -error;
+            
+            // Rekonstruktion: Prädiktion + Residuum
+            int reconstructed = pred_corr + error;
+            
+            // Auf gültigen Bereich beschränken
+            reconstructed = std::clamp(reconstructed, 0, 255);
+            
+            // In temporären Puffer speichern
+            tempData[y * m_width + x] = static_cast<PGMImage::Sample>(reconstructed);
+            
+            // Debug-Ausgabe
+            if (dbg_count < DBG_PRINT_PIXELS) {
+                std::cout << "[DBG ADD] idx=" << (y*m_width + x)
+                          << " (" << x << "," << y << ")"
+                          << " [a,b,c,d]=[" << a << "," << b << "," << c << "," << d << "]"
+                          << " grads={" << g1 << "," << g2 << "," << g3 << "}"
+                          << " q={" << q1 << "," << q2 << "," << q3 << "}"
+                          << " sign=" << sign
+                          << " pred_med=" << pred_med
+                          << " pred_corr=" << pred_corr
+                          << " error_stored=" << error_stored
+                          << " error=" << error
+                          << " reconstructed=" << reconstructed
+                          << " ctx=" << ctxIdx
+                          << " ctx(A,B,N,C)=(" << ctx.A << "," << ctx.B << "," << ctx.N << "," << ctx.C << ")"
+                          << std::endl;
+                ++dbg_count;
+            }
+            if (dbg_count < DBG_PRINT_PIXELS) std::cout << "ctxIdx: " << ctxIdx << "error" << error << std::endl;
+            // STEP 11-12: Context-Zähler aktualisieren
+            updateContextLocoI(ctxIdx, error_stored);
         }
-      
-        m_data = m_org; // Rekonstruierte Daten zurückkopieren
     }
+    
+    // Rekonstruierte Daten zurück in m_data kopieren
+    m_data = tempData;
+
+    std::cout << "\n=== ADDPREDICTION SUMMARY ===\n"
+              << "Reconstruction complete\n" << std::endl;
+}
 
 private:
-    // ------------------------------
-    // Feste MED-Prädiktion (Median Edge Detector)
-    // ------------------------------
-    int getFixedPrediction(const PGMImage::Sample* data, int x, int y) const
+    // LOCO-I konforme Context-Aktualisierung
+    inline void updateContextLocoI(int ctxIdx, int error)
     {
-        auto get = [&](int xx, int yy) -> PGMImage::Sample {
-            if (xx < 0) xx = 0;
-            if (yy < 0) yy = 0;
-            if (xx >= m_width) xx = m_width - 1;
-            if (yy >= m_height) yy = m_height - 1;
-            return data[yy * m_width + xx];
-        };
-      
-        PGMImage::Sample sample_a = get(x - 1, y);     // links
-        PGMImage::Sample sample_b = get(x, y - 1);     // oben  
-        PGMImage::Sample sample_c = get(x - 1, y - 1); // oben-links
+        if (ctxIdx < 1 || ctxIdx >= 365) return;
         
-        // LOCO-I Median Predictor (MED) - KORREKTE IMPLEMENTIERUNG
-        if (sample_c >= std::max(sample_a, sample_b))
-            return std::min(sample_a, sample_b);
-        else if (sample_c <= std::min(sample_a, sample_b))
-            return std::max(sample_a, sample_b);
-        else
-            return sample_a + sample_b - sample_c;
-    }
-
-    // ------------------------------
-    // Bias-Korrektur anwenden
-    // ------------------------------
-    int applyBiasCorrection(int fixedPred, const PGMImage::Sample* data, int x, int y, 
-                           int& ctxIndex, int& sign)
-    {
-        // Kontext berechnen
-        ctxIndex = computeContext(data, x, y, sign);
+        Context& ctx = m_ctxs[ctxIdx];
         
-        // Sicherstellen, dass Kontext-Index gültig ist
-        size_t idx = static_cast<size_t>(std::clamp(ctxIndex, 0, static_cast<int>(m_ctxs.size() - 1)));
-        Context& ctx = m_ctxs[idx];
-        
-        // Korrigierte Prädiktion - WICHTIG: C-Wert verwenden
-        int correctedPred = fixedPred;
-        if (sign > 0) 
-            correctedPred += ctx.C;
-        else 
-            correctedPred -= ctx.C;
-        
-        return std::clamp(correctedPred, 0, 255);
-    }
-
-    // ------------------------------
-    // Gradient Quantisierung
-    // ------------------------------
-    inline int quantize(int g) const
-    {
-        const int T1 = 3, T2 = 7, T3 = 21;
-        g = std::clamp(g, -255, 255);
-        
-        if (g <= -T3) return -4;
-        if (g <= -T2) return -3;
-        if (g <= -T1) return -2;
-        if (g < 0) return -1;
-        if (g == 0) return 0;
-        if (g < T1) return 1;
-        if (g < T2) return 2;
-        if (g < T3) return 3;
-        return 4;
-    }
-
-    // ------------------------------
-    // Kontext berechnen
-    // ------------------------------
-    inline int computeContext(const PGMImage::Sample* data, int x, int y, int& sign)
-    {
-        auto get = [&](int xx, int yy) -> PGMImage::Sample {
-            if (xx < 0) xx = 0;
-            if (yy < 0) yy = 0;
-            if (xx >= m_width) xx = m_width - 1;
-            if (yy >= m_height) yy = m_height - 1;
-            return data[yy * m_width + xx];
-        };
-        
-        PGMImage::Sample sample_a = get(x - 1, y);     // links
-        PGMImage::Sample sample_b = get(x, y - 1);     // oben
-        PGMImage::Sample sample_c = get(x - 1, y - 1); // oben-links
-        PGMImage::Sample sample_d = get(x + 1, y - 1); // oben-rechts
-        
-        // Gradienten berechnen
-        int g1 = int(sample_d) - int(sample_b);
-        int g2 = int(sample_b) - int(sample_c);
-        int g3 = int(sample_c) - int(sample_a);
-        
-        // Gradienten quantisieren
-        int q1 = quantize(g1);
-        int q2 = quantize(g2);
-        int q3 = quantize(g3);
-        
-        // Sign bestimmen (erste nicht-Null Komponente)
-        sign = 1;
-        if (q1 < 0) sign = -1;
-        else if (q1 == 0 && q2 < 0) sign = -1;
-        else if (q1 == 0 && q2 == 0 && q3 < 0) sign = -1;
-        
-        // Für negative Sign, Vorzeichen umkehren
-        if (sign < 0) {
-            q1 = -q1;
-            q2 = -q2; 
-            q3 = -q3;
-        }
-        
-        // Kontext-Index berechnen (1..364)
-        int idx = (q1 + 4) * 81 + (q2 + 4) * 9 + (q3 + 4);
-        int ctxIndex = (idx / 2) + 1;
-        
-        return std::clamp(ctxIndex, 1, 364);
-    }
-
-    // ------------------------------
-    // Modulo-Korrektur für Residuen
-    // ------------------------------
-    inline int moduloCorrection(int error) const
-    {
-        const int halfA = m_alphabetSize / 2;
-        error = ((error + halfA) % m_alphabetSize) - halfA;
-        if (error < -halfA) error += m_alphabetSize;
-        return error;
-    }
-
-    // ------------------------------
-    // Kontext aktualisieren
-    // ------------------------------
-    inline void updateContext(int ctxIdx, int error)
-    {
-        if (ctxIdx == 0) return;
-        
-        size_t idx = static_cast<size_t>(std::clamp(ctxIdx, 0, static_cast<int>(m_ctxs.size() - 1)));
-        Context& ctx = m_ctxs[idx];
-        
-        // Zähler aktualisieren
+        // STEP 11: Zähler aktualisieren
         ctx.B += error;
         ctx.A += std::abs(error);
         ctx.N += 1;
         
-        // Bias-Korrektur (C) aktualisieren
+        // Reset-Schwellenwert (Lmax-Äquivalent)
+        const int N_RESET = 640;
+        if (ctx.N >= N_RESET) {
+            ctx.N >>= 1;
+            ctx.A >>= 1;
+            ctx.B >>= 1;
+        }
+        
+        // STEP 12: B und C aktualisieren nach LOCO-I Schema
         if (ctx.B <= -ctx.N) {
             ctx.C -= 1;
             ctx.B += ctx.N;
@@ -440,26 +493,25 @@ private:
             if (ctx.B > 0) ctx.B = 0;
         }
         
-        // Periodisches Zurücksetzen (Reset)
-        if (ctx.N >= 64) {
-            ctx.N >>= 1;
-            ctx.B >>= 1;
-            ctx.A >>= 1;
-        }
-        
-        // Sicherstellen, dass C im gültigen Bereich bleibt
+        // C clampen
         ctx.C = std::clamp(ctx.C, -128, 127);
     }
-
-    // ------------------------------
-    // Kontextstruktur
-    // ------------------------------
+    inline int quantize(int gradient) const
+    {
+        if (gradient == 0) return 0;
+        int sign = (gradient < 0) ? -1 : 1;
+        int a = std::abs(gradient);
+        if (a <= 2)   return sign * 1;
+        if (a <= 6)   return sign * 2;
+        if (a <= 20)  return sign * 3;
+        return sign * 4;
+    }
     struct Context
     {
-        int A = 0; // Kumulierte Summe der absoluten Fehler
-        int B = 0; // Kumulierte Summe der Fehler (für Bias-Korrektur)
-        int N = 1; // Anzahl der Kontext-Vorkommen
-        int C = 0; // Bias-Korrekturwert
+        int A = 0;  // Sum of absolute errors
+        int B = 0;  // Sum of errors (for bias)
+        int N = 1;  // Context count
+        int C = 0;  // Bias correction value
     };
 private:
     // Diagnose-Variablen

@@ -93,70 +93,86 @@ bool readCmdLine( int argc, char** argv, cmdPars& pars )
 class EntropyCoderBase
 {
 protected:
-  EntropyCoderBase() 
-  {
-    m_pmfAbs  = std::vector<uint8_t>(N, uint8_t{0});  
-  }
+    EntropyCoderBase()
+    {
+        for (auto &ctx : m_pmfAbsCtx) {
+            for (auto &p : ctx) p = 0;  // initiale Wahrscheinlichkeiten
+        }
+    }
 
 protected:
-  static const unsigned   N = 3;    // number of probability models for unary binarization of absolute values
-  std::vector<uint8_t>    m_pmfAbs; // probability models for coding absolute values
+    static const unsigned N = 3;        // number of probability models per unary binarization
+    static const unsigned NUM_CTX = 365; // number of contexts
+    std::array<std::array<uint8_t, N>, NUM_CTX> m_pmfAbsCtx; // probability models pro Kontext
 };
 
 
 class EntropyEncoder : protected EntropyCoderBase
 {
 public:
-  EntropyEncoder( OBitstream& bs ) : EntropyCoderBase(), aenc(bs)
-  {
-    aenc.start();
-  }
-  void encodeSample  ( PGMImage::Sample s );
-  void finish        ()    
-  { 
-    aenc.finish(); 
-  }
+    EntropyEncoder(OBitstream &bs) : EntropyCoderBase(), aenc(bs)
+    {
+        aenc.start();
+    }
+
+    void encodeSample(PGMImage::Sample s, unsigned ctxIdx);
+
+    void finish() { aenc.finish(); }
+
 private:
-  ArithmeticEncoder aenc;
+    ArithmeticEncoder aenc;
 };
+
 
 class EntropyDecoder : protected EntropyCoderBase
 {
 public:
-  EntropyDecoder( IBitstream& bs ) : EntropyCoderBase(), adec(bs)
-  {
-    adec.start();
-  }
-  PGMImage::Sample  decodeSample  ();
+    EntropyDecoder(IBitstream &bs) : EntropyCoderBase(), adec(bs)
+    {
+        adec.start();
+    }
+
+    PGMImage::Sample decodeSample(unsigned ctxIdx);
+
 private:
-  ArithmeticDecoder adec;
+    ArithmeticDecoder adec;
 };
 
-void EntropyEncoder::encodeSample( PGMImage::Sample s )
+
+// -----------------------------
+// Encoder
+// -----------------------------
+void EntropyEncoder::encodeSample(PGMImage::Sample s, unsigned ctxIdx)
 {
-  unsigned absValue = unsigned( s < 0 ? -s : s );
-  unsigned rem      = absValue;
-  unsigned binIdx   = 0;
-  while( rem-- )
-  {
-    aenc.encBin ( m_pmfAbs[ std::min<unsigned>( N-1, binIdx++ ) ], 1 );
-  }
-  aenc.encBin   ( m_pmfAbs[ std::min<unsigned>( N-1, binIdx++ ) ], 0 );
-  if( absValue )
-    aenc.encBit ( s<0 );
+    unsigned absValue = unsigned(s < 0 ? -s : s);
+    unsigned rem = absValue;
+    unsigned binIdx = 0;
+
+    while (rem--)
+        aenc.encBin(m_pmfAbsCtx[ctxIdx][std::min<unsigned>(N - 1, binIdx++)], 1);
+
+    aenc.encBin(m_pmfAbsCtx[ctxIdx][std::min<unsigned>(N - 1, binIdx++)], 0);
+
+    if (absValue)
+        aenc.encBit(s < 0);
 }
 
-PGMImage::Sample EntropyDecoder::decodeSample()
+
+// -----------------------------
+// Decoder
+// -----------------------------
+PGMImage::Sample EntropyDecoder::decodeSample(unsigned ctxIdx)
 {
-  PGMImage::Sample  s      = 0;
-  unsigned          binIdx = 0;
-  while( adec.decBin( m_pmfAbs[ std::min<unsigned>( N-1, binIdx++ ) ] ) )
-  {
-    s++;
-  }
-  if( s && adec.decBit() )
-    s = -s;
-  return s;
+    PGMImage::Sample s = 0;
+    unsigned binIdx = 0;
+
+    while (adec.decBin(m_pmfAbsCtx[ctxIdx][std::min<unsigned>(N - 1, binIdx++)]))
+        s++;
+
+    if (s && adec.decBit())
+        s = -s;
+
+    return s;
 }
 
 
@@ -168,78 +184,106 @@ PGMImage::Sample EntropyDecoder::decodeSample()
 //   LOCO-I PREDICTOR (JPEG-LS) - KORRIGIERTE IMPLEMENTIERUNG
 //
 //======================================================
+//======================================================
+//
+//   LOCO-I PREDICTOR MIT DIAGNOSE
+//
+//======================================================
 class Prediction
 {
 public:
     Prediction(int width, int height, std::vector<PGMImage::Sample>& img)
         : m_width(width), m_height(height), m_data(img), m_org(m_data)
     {
-        m_ctxs.resize(365); // 365 Kontexte wie in JPEG-LS
+        m_ctxs.resize(365);
         
-        // Initialisiere Kontext-Zähler
         for (auto& ctx : m_ctxs) {
             ctx.N = 1;
-            ctx.A = std::max(2, (width * height + 32) / 64); // Initialwert für A
+            ctx.A = std::max(2, (width * height + 32) / 64);
             ctx.B = 0;
             ctx.C = 0;
         }
+        
+        // Diagnose-Zähler
+        bias_used = 0;
+        total_pixels = 0;
     }
 
-    // ------------------------------
-    // Prädiktion subtrahieren (Encoding)
-    // ------------------------------
-    void subtractPrediction()
+    void subtractPrediction(EntropyEncoder& eenc)
     {
         const PGMImage::Sample* orgData = m_org.data();
         PGMImage::Sample* data = m_data.data();
     
-        for (int y = 0; y < m_height; ++y)
-        {
-            for (int x = 0; x < m_width; ++x)
-            {
-                int ctxIdx;
-                int sign;
-                
-                // Feste Prädiktion auf ORIGINAL-Daten
-                int fixedPred = getFixedPrediction(orgData, x, y);
-                
-                // Kontext-basierte adaptive Korrektur
-                int correctedPred = applyBiasCorrection(fixedPred, orgData, x, y, ctxIdx, sign);
-                
-                // Prädiktionsfehler berechnen
-                int actual = orgData[y * m_width + x];
-                int error = actual - correctedPred;
-                
-                // Vorzeichen anpassen basierend auf Kontext-Sign
-                if (sign < 0) error = -error;
-                
-                // Modulo-Korrektur für Residuen
-                error = moduloCorrection(error);
-                
-                // In Daten speichern
-                data[y * m_width + x] = static_cast<PGMImage::Sample>(std::clamp(error, -128, 127));
-                
-                // Kontext aktualisieren
-                updateContext(ctxIdx, error);
-            }
-        }
-    }
-
-    // ------------------------------
-    // Prädiktion addieren (Decoding)
-    // ------------------------------
-    void addPrediction()
-    {
-        PGMImage::Sample* recData = m_org.data();
-        const PGMImage::Sample* data = m_data.data();
+        int zero_residuals = 0;
+        int small_residuals = 0;
     
         for (int y = 0; y < m_height; ++y)
         {
             for (int x = 0; x < m_width; ++x)
             {
+                total_pixels++;
+            
                 int ctxIdx;
                 int sign;
-                
+                int fixedPred = getFixedPrediction(orgData, x, y);
+                int correctedPred = applyBiasCorrection(fixedPred, orgData, x, y, ctxIdx, sign);
+            
+                if (std::abs(correctedPred - fixedPred) > 0) bias_used++;
+            
+                int actual = orgData[y * m_width + x];
+                int error = actual - correctedPred;
+            
+                if (sign < 0) error = -error;
+                error = moduloCorrection(error);
+            
+                if (error == 0) zero_residuals++;
+                if (std::abs(error) <= 1) small_residuals++;
+            
+                data[y * m_width + x] = static_cast<PGMImage::Sample>(std::clamp(error, -128, 127));
+            
+                // WICHTIG: Residuum direkt encoden, PMFs werden automatisch angepasst
+                eenc.encodeSample(data[y * m_width + x], ctxIdx);
+            
+                updateContext(ctxIdx, error);
+            
+                // Rekonstruiertes Pixel für nächsten Kontext vorbereiten
+                // (optional, falls du es später noch brauchst)
+                // reconstructedData[y * m_width + x] = correctedPred + error;
+            }
+        }
+      
+        eenc.finish();
+        // bs.byteAlign(); // Wenn nötig, im OBitstream aufrufen
+      
+        std::cout << "Bias-Korrektur verwendet: " << bias_used << "/" << total_pixels 
+                  << " (" << (100.0 * bias_used / total_pixels) << "%)" << std::endl;
+        std::cout << "Null-Residuen: " << zero_residuals << "/" << total_pixels 
+                  << " (" << (100.0 * zero_residuals / total_pixels) << "%)" << std::endl;
+        std::cout << "Kleine Residuen (|e|<=1): " << small_residuals << "/" << total_pixels 
+                  << " (" << (100.0 * small_residuals / total_pixels) << "%)" << std::endl;
+    }
+
+
+    // ------------------------------
+    // Prädiktion addieren (Decoding)
+    // ------------------------------
+    void addPrediction(EntropyDecoder& edec)
+    {
+        PGMImage::Sample* recData = m_org.data();
+        PGMImage::Sample* data = m_data.data();
+
+        for (int y = 0; y < m_height; ++y)
+        {
+            for (int x = 0; x < m_width; ++x)
+            {
+
+
+                int ctxIdx;
+                int sign;
+                ctxIdx = computeContext(recData, x, y, sign);
+                data[y * m_width + x] = edec.decodeSample(ctxIdx);
+
+
                 // Feste Prädiktion auf REKONSTRUIERTEN Daten
                 int fixedPred = getFixedPrediction(recData, x, y);
                 
@@ -412,7 +456,7 @@ private:
         ctx.A += std::abs(error);
         ctx.N += 1;
         
-        // Bias-Korrektur (C) aktualisieren - KORREKTE IMPLEMENTIERUNG
+        // Bias-Korrektur (C) aktualisieren
         if (ctx.B <= -ctx.N) {
             ctx.C -= 1;
             ctx.B += ctx.N;
@@ -444,8 +488,10 @@ private:
         int N = 1; // Anzahl der Kontext-Vorkommen
         int C = 0; // Bias-Korrekturwert
     };
-
 private:
+    // Diagnose-Variablen
+    int bias_used;
+    int total_pixels;
     const int m_alphabetSize = 256;
     int m_width;
     int m_height;
@@ -458,48 +504,29 @@ private:
 
 
 
-
 //======================================================
 //
-//   M A I N    E N C O D I N G   +   D E C O D I N G
+//   M A I N ENCODING + DECODING
 //
 //======================================================
-void encode( const std::string& inname, const std::string& outname )
+void encode(const std::string& inname, const std::string& outname)
 {
+    PGMImage img;
+    img.read(inname);
 
-  // read original image
-  PGMImage img;
+    std::ofstream stream(outname, std::ios::out | std::ios::binary);
+    OBitstream bs(stream);
 
-  img.read( inname );
+    bs.addFixed<unsigned>(img.getWidth(), 16);
+    bs.addFixed<unsigned>(img.getHeight(), 16);
+    
+    EntropyEncoder eenc(bs);
+    Prediction pred(img.getWidth(), img.getHeight(), img.getData());
 
-  // create bitstream + write header
-  std::ofstream stream( outname, std::ios::out|std::ios::binary );
-  OBitstream    bs( stream );
-  assert( stream.good() );
-  bs.addFixed<unsigned>( img.getWidth(),  16 );
-  bs.addFixed<unsigned>( img.getHeight(), 16 );
-  
-  // code image block by block
-  EntropyEncoder  eenc( bs );
-  Prediction      pred( img.getWidth(), img.getHeight(), img.getData() );
-
-  // apply prediction
-  pred.subtractPrediction();
-  {
-    std::ofstream residFile("residues.txt");
-    PGMImage::Sample* data = img.getData().data();
-    for (int k = 0; k < img.getSize(); k++) {
-        residFile << int(data[k]) << "\n";  // int cast für negative Werte
-    }
-}
-  // encode prediction error signal
-  PGMImage::Sample* data = img.getData().data();
-  for( int k = 0; k < img.getSize(); k++ )
-    eenc.encodeSample( data[k] );
-  eenc.finish();
-
-  bs.byteAlign();
-  assert( stream.good() );
+    // Prädiktion anwenden
+    pred.subtractPrediction(eenc);
+    bs.byteAlign();
+    
 }
 
 
@@ -518,39 +545,15 @@ void decode( const std::string& inname, const std::string& outname )
   Prediction      pred( img.getWidth(), img.getHeight(), img.getData() );
 
   // decode prediction error signal
-  PGMImage::Sample* data = img.getData().data();
-  for( int k = 0; k < img.getSize(); k++ )
-    data[k] = edec.decodeSample();
+
 
   // apply prediction
-  pred.addPrediction();
+  pred.addPrediction(edec);
 
   // output reconstructed image
   img.write( outname );
 }
 
-
-
-
-
-//======================================================
-//
-//   M A I N
-//
-//======================================================
-//int main( int argc, char** argv )
-//{
-//  cmdPars pars;
-//  if( !readCmdLine( argc, argv, pars ) )
-//    return 1;
-//
-//  if( pars.decode )
-//    decode( pars.inname, pars.outname );
-//  else
-//    encode( pars.inname, pars.outname );
-//
-//  return 0;
-//}
 namespace fs = std::filesystem;
 
 int main() {
