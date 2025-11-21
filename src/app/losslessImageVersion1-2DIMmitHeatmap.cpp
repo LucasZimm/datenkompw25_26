@@ -181,11 +181,10 @@ PGMImage::Sample EntropyDecoder::decodeSample(unsigned ctxIdx)
 
 
 
-//======================================================
-//
-//   LOCO-I PREDICTOR (JPEG-LS) - KORRIGIERTE IMPLEMENTIERUNG
-//
-//======================================================
+
+
+
+
 //======================================================
 //
 //   LOCO-I PREDICTOR MIT DIAGNOSE
@@ -228,7 +227,8 @@ public:
     {
         const PGMImage::Sample* orgData = m_org.data();
         PGMImage::Sample* data = m_data.data();
-        
+        std::vector<int16_t> residualRaw(m_width * m_height);
+        int debug = 1;
         int zero_residuals = 0;
         int small_residuals = 0;
         
@@ -306,33 +306,52 @@ public:
                 // STEP 7: Residuum berechnen
                 int actual = int(orgData[y * m_width + x]);
 
-                int error = actual - pred_corr;
-                
-                // Negatives Vorzeichen anwenden falls nötig
-                if (sign < 0)
-                    error = -error;
-                
+                // Fehler berechnen
+                int error_code = actual - pred_corr;
+                residualRaw[y * m_width + x] = static_cast<int16_t>(error_code);
+                // Modulo-Faltung des Fehlers
+                int e_fold = ((error_code % 256) + 256) % 256;
+                if (e_fold >= 128) e_fold -= 256;
 
-                int error_mod = error;
+                // Speichern des gefalteten Residuums
+                data[y * m_width + x] = static_cast<PGMImage::Sample>(
+                    std::clamp(e_fold, -128, 127)
+                );
 
-                // Speichern des Residuums
-                data[y * m_width + x] = static_cast<PGMImage::Sample>(error);
 
-                eenc.encodeSample(data[y * m_width + x], ctxIdx);
+                // Codieren mit CABAC
+                eenc.encodeSample(static_cast<PGMImage::Sample>(e_fold), ctxIdx);
                 // Residuen-Statistiken
+                int error_mod = error_code;
                 if (error_mod == 0) zero_residuals++;
                 if (std::abs(error_mod) <= 1) small_residuals++;
                 
                 // Debug-Ausgabe in Datei schreiben
+                if (debug ==1) {
                 writeDebugSubtract(y * m_width + x, x, y, a, b, c, d, g1, g2, g3, 
                                    q1, q2, q3, sign, pred_med, pred_corr, actual, 
-                                   error, ctxIdx, ctx);
-                
+                                   error_code, ctxIdx, ctx);
+                }
                 // STEP 11-12: Context-Zähler aktualisieren
-                updateContextLocoI(ctxIdx, error);
+                int error_ctx = (sign < 0) ? -error_code : error_code;
+                updateContextLocoI(ctxIdx, error_ctx);
             }
         }
+
         eenc.finish();
+        auto saveRawPGM = [&](const std::string& filename) {
+          std::ofstream out(filename, std::ios::binary);
+          if (!out.is_open()) return;
+
+          out << "P5\n" << m_width << " " << m_height << "\n255\n";
+          for (int i = 0; i < m_width * m_height; ++i) {
+              int e = std::clamp<int>(residualRaw[i], -128, 127);
+              uint8_t v = static_cast<uint8_t>(e + 128);
+              out.write(reinterpret_cast<const char*>(&v), 1);
+          }
+      };
+
+        saveRawPGM("output/residuals_raw.pgm");
         std::cout << "\n=== SUBTRACTPREDICTION SUMMARY ===\n"
                   << "Total pixels: " << total_pixels << "\n"
                   << "Bias corrections: " << bias_used << " (" << (100.0*bias_used/total_pixels) << "%)\n"
@@ -345,7 +364,7 @@ public:
 {
     // Temporären Puffer für rekonstruierte Daten erstellen
     std::vector<PGMImage::Sample> tempData(m_data.size());
-
+    int debug = 1;
     for (int y = 0; y < m_height; ++y)
     {
         for (int x = 0; x < m_width; ++x)
@@ -408,26 +427,28 @@ public:
             pred_corr = std::clamp(pred_corr, 0, 255);
 
             // STEP 7: Residuum direkt vom Decoder holen
-            int error_stored = edec.decodeSample(ctxIdx);
+            int e_fold = edec.decodeSample(ctxIdx);
+                      
+            // Rekonstruktion mit modulo-Addition
+            int reconstructed = (pred_corr + e_fold) & 0xFF;
+            tempData[y * m_width + x] = static_cast<PGMImage::Sample>(reconstructed);      
 
-            int error = error_stored;
-            if (sign < 0) error = -error;
+            // echten Fehler für Kontextupdate neu berechnen
+            int error_code = reconstructed - pred_corr;
+            int error_ctx = (sign < 0) ? -error_code : error_code;
 
-            // Rekonstruktion
-            int reconstructed = pred_corr + error;
-            reconstructed = std::clamp(reconstructed, 0, 255);
-
-            // Speichern
-            tempData[y * m_width + x] = static_cast<PGMImage::Sample>(reconstructed);
 
             // Debug
+            if (debug ==1) {
+             
             writeDebugAdd(y * m_width + x, x, y, a, b, c, d,
                           g1, g2, g3, q1, q2, q3, sign,
                           pred_med, pred_corr, reconstructed,
-                          error, ctxIdx, ctx);
+                          error_code, ctxIdx, ctx);
+            }
 
             // STEP 11-12: Kontextupdate mit Residuum
-            updateContextLocoI(ctxIdx, error_stored);
+            updateContextLocoI(ctxIdx, error_ctx);
         }
     }
 
