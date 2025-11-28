@@ -16,11 +16,9 @@
 #include <filesystem>
 
 #include "../lib/arithCoding.h"
-
 #include "../lib/pgm.h"
 
-
-
+namespace fs = std::filesystem;
 
 //======================================================
 //
@@ -29,55 +27,63 @@
 //======================================================
 struct cmdPars
 {
-  bool        decode;
-  std::string inname;
-  std::string outname;
+    bool        decode;
+    std::string inname;
+    std::string outname;
+    std::string outdir;   
 };
 
-bool readCmdLine( int argc, char** argv, cmdPars& pars )
+
+bool readCmdLine(int argc, char** argv, cmdPars& pars)
 {
-  std::stringstream err;
-  int               arg = 0;
-  bool              ok  = true;
-  ok = ok && ( argc > ++arg );
-  if( ok ) {
-    if( std::string( argv[ arg ] ) == std::string( "-e" ) ) {
-      pars.decode = false;
-    } else if( std::string( argv[ arg ] ) == std::string( "-d" ) ) {
-      pars.decode = true;
-    } else {
-      err << "ERROR: First parameter must be '-e' or '-d'." << std::endl;
-      ok = false;
+    std::stringstream err;
+    int arg = 0;
+    bool ok = true;
+
+    ok = ok && (argc > ++arg);
+    if (ok) {
+        if (std::string(argv[arg]) == "-e")
+            pars.decode = false;
+        else if (std::string(argv[arg]) == "-d")
+            pars.decode = true;
+        else {
+            err << "ERROR: First parameter must be '-e' or '-d'." << std::endl;
+            ok = false;
+        }
     }
-  }
-  ok = ok && ( argc > ++arg );
-  if( ok )  {
-    pars.inname = std::string( argv[ arg ] );
-    std::ifstream intest( pars.inname );
-    if( !intest.good() ) { 
-      err << "ERROR: Cannot open input file \"" << pars.inname << "\"." << std::endl;
-      ok = false; 
-    } 
-  }
-  ok = ok && ( argc > ++arg );
-  if( ok )  {
-    pars.outname = std::string( argv[ arg ] );
-    std::ofstream outtest( pars.outname );
-    if( !outtest.good() ) { 
-      err << "ERROR: Cannot open output file \"" << pars.outname << "\"." << std::endl;
-      ok = false; 
-    } 
-  }
-  if( !ok) {
-    std::string pname = std::string( argv[0] );
-    std::cerr << err.str() << std::endl;
-    std::cerr << "Usage: " << std::endl;
-    std::cerr << "  decoding: " << pname << " -d binFile recFile" << std::endl;
-    std::cerr << "  encoding: " << pname << " -e orgFile binFile" << std::endl;
-    std::cerr << std::endl;
-    return false;
-  }
-  return true;
+
+    ok = ok && (argc > ++arg);
+    if (ok) {
+        pars.inname = argv[arg];
+        std::ifstream intest(pars.inname);
+        if (!intest.good()) {
+            err << "ERROR: Cannot open input file \"" << pars.inname << "\"." << std::endl;
+            ok = false;
+        }
+    }
+
+    ok = ok && (argc > ++arg);
+    if (ok) {
+        pars.outname = argv[arg];
+    }
+
+    // ===== OPTIONAL: Output-Ordner =====
+    if (argc > ++arg) {
+        pars.outdir = argv[arg];
+    } else {
+        pars.outdir = "output";
+    }
+
+    if (!ok) {
+        std::string pname = argv[0];
+        std::cerr << err.str() << std::endl;
+        std::cerr << "Usage:" << std::endl;
+        std::cerr << "  decoding: " << pname << " -d inFile outFile [outputDir]" << std::endl;
+        std::cerr << "  encoding: " << pname << " -e inFile outFile [outputDir]" << std::endl;
+        return false;
+    }
+
+    return true;
 }
 
 
@@ -204,8 +210,8 @@ PGMImage::Sample EntropyDecoder::decodeSample(unsigned ctxIdx)
 class Prediction
 {
 public:
-    Prediction(int width, int height, std::vector<PGMImage::Sample>& img, bool isDecoding = false)
-        : m_width(width), m_height(height), m_data(img), m_org(m_data), m_isDecoding(isDecoding)
+    Prediction(int width, int height, std::vector<PGMImage::Sample>& img, bool isDecoding = false, const std::string& outputDir = "output")
+        : m_width(width), m_height(height), m_data(img), m_org(m_data), m_isDecoding(isDecoding), m_outputDir(outputDir)
     {
         m_ctxs.resize(365);
         
@@ -216,11 +222,13 @@ public:
             ctx.C = 0;
         }
         
-        // Debug-Streams öffnen mit unterschiedlichen Dateinamen
+        // Debug-Streams öffnen mit Pfad aus outputDir
+        fs::create_directories(outputDir);
+        
         if (isDecoding) {
-            m_decDebugFile.open("dec_debug.txt", std::ios::out);
+            m_decDebugFile.open(outputDir + "/dec_debug.txt", std::ios::out);
         } else {
-            m_encDebugFile.open("enc_debug.txt", std::ios::out);
+            m_encDebugFile.open(outputDir + "/enc_debug.txt", std::ios::out);
         }
         
         // Diagnose-Zähler
@@ -242,58 +250,80 @@ public:
         int debug = 1;
         int zero_residuals = 0;
         int small_residuals = 0;
-        
+
+        // --------------------
+        // Histogramme initialisieren
+        // --------------------
+        // Kontext-Histogramme
+        std::array<size_t, 256> histoA_ctx{};
+        std::array<size_t, 256> histoB_ctx{};
+        std::array<size_t, 256> histoC_ctx{};
+        std::array<size_t, 256> histoD_ctx{};
+        // Fehler-Histogramme
+        std::array<size_t, 511> histoA_err{};
+        std::array<size_t, 511> histoB_err{};
+        std::array<size_t, 511> histoC_err{};
+        std::array<size_t, 511> histoD_err{};
+        std::array<size_t, 511> histoAll_err{};
+        // --------------------
+        // MiniBilder
+        // --------------------
+        struct ContextStats {
+            uint64_t sumA = 0, sumB = 0, sumC = 0, sumD = 0, sumX = 0;
+            uint64_t count = 0;
+        };
+
+        std::vector<ContextStats> ctxStats(366); // 0..364
+
         for (int y = 0; y < m_height; ++y)
         {
             for (int x = 0; x < m_width; ++x)
             {
                 total_pixels++;
-                
+
                 // STEP 0: Nachbarwerte laden (Rand = 0)
                 auto get = [&](int xx, int yy) -> int {
                     if (xx < 0 || yy < 0) return 0;
                     if (xx >= m_width || yy >= m_height) return 0;
                     return int(orgData[yy * m_width + xx]);
                 };
-                
+
                 int a = get(x - 1, y);     // left
                 int b = get(x,     y - 1); // up
                 int c = get(x - 1, y - 1); // up-left
                 int d = get(x + 1, y - 1); // up-right
-                
-                // STEP 1: Lokale Gradienten berechnen
-                int g1 = d - b;  // db
-                int g2 = b - c;  // bc
-                int g3 = c - a;  // ca
-                
-                // STEP 3 + 4: Gradienten quantisieren und Kontext bestimmen
+
+                // STEP 1: Lokale Gradienten
+                int g1 = d - b;
+                int g2 = b - c;
+                int g3 = c - a;
+
+                // STEP 3 + 4: Gradienten quantisieren + Kontext
                 int q1 = quantize(g1);
                 int q2 = quantize(g2);
                 int q3 = quantize(g3);
-                
-                // Vorzeichen bestimmen (erste nicht-Null Komponente)
+
                 int sign = 1;
                 if (q1 < 0) sign = -1;
                 else if (q1 == 0 && q2 < 0) sign = -1;
                 else if (q1 == 0 && q2 == 0 && q3 < 0) sign = -1;
-                
-                // Gradienten normalisieren für Kontext-Index
+
                 int q1_norm = q1, q2_norm = q2, q3_norm = q3;
                 if (sign < 0) {
                     q1_norm = -q1;
                     q2_norm = -q2;
                     q3_norm = -q3;
                 }
-                
-                // Kontext-Index berechnen (1..364)
+
                 int ctxIdx = (q1_norm) * 25 + (q2_norm) * 5 + (q3_norm);
                 ctxIdx = std::clamp(ctxIdx, 0, 364);
                 if (ctxIdx == 0) ctxIdx = 1;
 
-                size_t safeIdx = static_cast<size_t>(ctxIdx);
-                Context& ctx = m_ctxs[safeIdx];
-                
-                // STEP 5: Feste MED-Prädiktion berechnen
+
+
+                Context& ctx = m_ctxs[ctxIdx];
+
+                // STEP 5: MED-Prädiktion
                 int pred_med;
                 if (c >= std::max(a, b))
                     pred_med = std::min(a, b);
@@ -301,89 +331,188 @@ public:
                     pred_med = std::max(a, b);
                 else
                     pred_med = a + b - c;
-                
-                // STEP 6: Adaptive Korrektur anwenden
+
+                // STEP 6: Adaptive Korrektur
                 int pred_corr = pred_med;
                 if (sign > 0)
                     pred_corr += ctx.C;
                 else
                     pred_corr -= ctx.C;
                 pred_corr = std::clamp(pred_corr, 0, 255);
-                
+
                 if (std::abs(pred_corr - pred_med) > 0) {
                     bias_used++;
                 }
-                
+
                 // STEP 7: Residuum berechnen
                 int actual = int(orgData[y * m_width + x]);
 
-                // Fehler berechnen
+                ctxStats[ctxIdx].sumA += a;
+                ctxStats[ctxIdx].sumB += b;
+                ctxStats[ctxIdx].sumC += c;
+                ctxStats[ctxIdx].sumD += d;
+                ctxStats[ctxIdx].sumX += actual;
+                ctxStats[ctxIdx].count++;
+
+
                 int error_code = actual - pred_corr;
                 residualRaw[y * m_width + x] = static_cast<int16_t>(error_code);
+
                 // Modulo-Faltung des Fehlers
                 int e_fold = ((error_code % 256) + 256) % 256;
                 if (e_fold >= 128) e_fold -= 256;
 
-                // Speichern des gefalteten Residuums
+                // Gefaltetes Residuum speichern
                 data[y * m_width + x] = static_cast<PGMImage::Sample>(
                     std::clamp(e_fold, -128, 127)
                 );
 
-
                 // Codieren mit CABAC
                 eenc.encodeSample(static_cast<PGMImage::Sample>(e_fold), ctxIdx);
+
                 // Residuen-Statistiken
-                int error_mod = error_code;
-                if (error_mod == 0) zero_residuals++;
-                if (std::abs(error_mod) <= 1) small_residuals++;
-                
-                // Debug-Ausgabe in Datei schreiben
-                if (debug ==1) {
-                writeDebugSubtract(y * m_width + x, x, y, a, b, c, d, g1, g2, g3, 
-                                   q1, q2, q3, sign, pred_med, pred_corr, actual, 
-                                   error_code, ctxIdx, ctx);
+                if (error_code == 0) zero_residuals++;
+                if (std::abs(error_code) <= 1) small_residuals++;
+
+                // --------------------
+                // Histogramme füllen
+                // --------------------
+                // Kontext-Histogramme
+                histoA_ctx[a]++;
+                histoB_ctx[b]++;
+                histoC_ctx[c]++;
+                histoD_ctx[d]++;
+                int eA = (actual - a)+255; // Fehler nur relativ zum linken Nachbarn
+                int eB = (actual - b)+255; // Fehler nur relativ zum oberen Nachbarn
+                int eC = (actual - c)+255; // Fehler nur relativ zum oben-links Nachbarn
+                int eD = (actual - d)+255; // Fehler nur relativ zum oben-rechts Nachbarn
+                histoA_err[eA]++;
+                histoB_err[eB]++;
+                histoC_err[eC]++;
+                histoD_err[eD]++;   
+                histoAll_err[error_code + 255]++;               
+
+                // Debug-Ausgabe
+                if (debug == 1) {
+                    writeDebugSubtract(y * m_width + x, x, y, a, b, c, d, g1, g2, g3, 
+                                       q1, q2, q3, sign, pred_med, pred_corr, actual, 
+                                       error_code, ctxIdx, ctx);
                 }
-                // STEP 11-12: Context-Zähler aktualisieren
+
+                // Context update
                 int error_ctx = (sign < 0) ? -error_code : error_code;
                 updateContextLocoI(ctxIdx, error_ctx);
             }
         }
 
         eenc.finish();
+
+        // --------------------
+        // Histogramme abspeichern
+        // --------------------
+        auto saveHistogram = [&](const std::array<size_t,256>& hist, const std::string& name) {
+            std::ofstream out(m_outputDir + "/" + name + ".txt");
+            for (size_t i = 0; i < hist.size(); ++i)
+                out << i << " " << hist[i] << "\n";
+        };
+        auto saveErrorHistogram = [&](const std::array<size_t,511>& hist, const std::string& name) {
+            std::ofstream out(m_outputDir + "/" + name + ".txt");
+            for (size_t i = 0; i < hist.size(); ++i)
+                out << int(i-255) << " " << hist[i] << "\n";
+        };
+        
+        // Kontext-Histogramme
+        saveHistogram(histoA_ctx, "histoA_ctx");
+        saveHistogram(histoB_ctx, "histoB_ctx");
+        saveHistogram(histoC_ctx, "histoC_ctx");
+        saveHistogram(histoD_ctx, "histoD_ctx");
+
+        // Fehler-Histogramme
+        saveErrorHistogram(histoA_err, "histoA_err");
+        saveErrorHistogram(histoB_err, "histoB_err");
+        saveErrorHistogram(histoC_err, "histoC_err");
+        saveErrorHistogram(histoD_err, "histoD_err");
+        saveErrorHistogram(histoAll_err, "histoAll_err");
+
+        // --------------------
+        // Residualbilder abspeichern
+        // --------------------
         auto saveRawPGM = [&](const std::string& filename) {
-          std::ofstream out(filename, std::ios::binary);
-          if (!out.is_open()) return;
+            std::ofstream out(filename, std::ios::binary);
+            if (!out.is_open()) return;
 
-          out << "P5\n" << m_width << " " << m_height << "\n255\n";
-          for (int i = 0; i < m_width * m_height; ++i) {
-              int e = std::clamp<int>(residualRaw[i], -128, 127);
-              uint8_t v = static_cast<uint8_t>(e + 128);
-              out.write(reinterpret_cast<const char*>(&v), 1);
-          }
-      };
+            out << "P5\n" << m_width << " " << m_height << "\n255\n";
+            for (int i = 0; i < m_width * m_height; ++i) {
+                int e = std::clamp<int>(residualRaw[i], -128, 127);
+                uint8_t v = static_cast<uint8_t>(e + 128);
+                out.write(reinterpret_cast<const char*>(&v), 1);
+            }
+        };
         auto saveRawPGM3color = [&](const std::string& filename) {
-          std::ofstream out(filename, std::ios::binary);
-          if (!out.is_open()) return;
+            std::ofstream out(filename, std::ios::binary);
+            if (!out.is_open()) return;
 
-          out << "P5\n" << m_width << " " << m_height << "\n255\n";
-          for (int i = 0; i < m_width * m_height; ++i) {
-              int e = std::clamp<int>(residualRaw[i], -128, 127);
-              uint8_t v;
-              if (abs(e) <= 1) (v = 0);
-              if (abs(e) > 1 && abs(e) <= 127) (v = 127);
-              if (abs(e) > 127 && abs(e) <= 255) (v = 255);
-              out.write(reinterpret_cast<const char*>(&v), 1);
-          }
-      };
-        saveRawPGM(std::string("output/residuals_raw") + std::to_string(gsize) + ".pgm");
-        saveRawPGM3color(std::string("output/residuals_3color") + std::to_string(gsize) + ".pgm");
+            out << "P5\n" << m_width << " " << m_height << "\n255\n";
+            for (int i = 0; i < m_width * m_height; ++i) {
+                int e = std::clamp<int>(residualRaw[i], -128, 127);
+                uint8_t v;
+                if (abs(e) <= 1) v = 0;
+                else if (abs(e) > 1 && abs(e) <= 127) v = 127;
+                else v = 255;
+                out.write(reinterpret_cast<const char*>(&v), 1);
+            }
+        };
+
+        for (int i = 1; i < 365; ++i)
+        {
+            if (ctxStats[i].count == 0) continue;
+        
+            double A = double(ctxStats[i].sumA) / ctxStats[i].count;
+            double B = double(ctxStats[i].sumB) / ctxStats[i].count;
+            double C = double(ctxStats[i].sumC) / ctxStats[i].count;
+            double D = double(ctxStats[i].sumD) / ctxStats[i].count;
+            double X = double(ctxStats[i].sumX) / ctxStats[i].count;
+
+            // Unterordner definieren
+            std::string miniDir = m_outputDir + "/minibilder";
+            std::filesystem::create_directories(miniDir);  
+            std::string filename = miniDir + "/ctx3x2_" + std::to_string(i) + ".pgm";
+
+            std::ofstream out(filename, std::ios::binary);
+        
+            out << "P5\n3 2\n255\n";
+
+            uint8_t img[6];
+
+            // Zeile 1
+            img[0] = (uint8_t)std::clamp(C, 0.0, 255.0);  // C
+            img[1] = (uint8_t)std::clamp(B, 0.0, 255.0);  // B
+            img[2] = (uint8_t)std::clamp(D, 0.0, 255.0);  // D
+
+            // Zeile 2
+            img[3] = (uint8_t)std::clamp(A, 0.0, 255.0);  // A
+            img[4] = (uint8_t)std::clamp(X, 0.0, 255.0);  // X (leer)
+            img[5] = 0;                                   // leer
+
+            out.write(reinterpret_cast<char*>(img), 6);
+        }
+
+
+        std::string residuals_raw = m_outputDir + "/residuals_raw_" + std::to_string(gsize) + ".pgm";
+        std::string residuals_3color = m_outputDir + "/residuals_3color_" + std::to_string(gsize) + ".pgm";
+
+        saveRawPGM(residuals_raw);
+        saveRawPGM3color(residuals_3color);
+
         std::cout << "\n=== SUBTRACTPREDICTION SUMMARY ===\n"
                   << "Total pixels: " << total_pixels << "\n"
                   << "Bias corrections: " << bias_used << " (" << (100.0*bias_used/total_pixels) << "%)\n"
                   << "Zero residuals: " << zero_residuals << " (" << (100.0*zero_residuals/total_pixels) << "%)\n"
                   << "Small residuals (|e|<=1): " << small_residuals << " (" << (100.0*small_residuals/total_pixels) << "%)\n"
+                  << "Histogramme gespeichert im Ordner: " << m_outputDir << "\n"
                   << std::endl;
     }
+
 
     void addPrediction(EntropyDecoder& edec)
 {
@@ -590,6 +719,7 @@ private:
     std::ofstream m_encDebugFile;
     std::ofstream m_decDebugFile;
     bool m_isDecoding;
+    std::string m_outputDir;  // NEU hinzufügen
     
     // Diagnose-Variablen
     int bias_used;
@@ -611,7 +741,7 @@ private:
 //   M A I N ENCODING + DECODING
 //
 //======================================================
-void encode(const std::string& inname, const std::string& outname, unsigned groupSize) {
+void encode(const std::string& inname, const std::string& outname, unsigned groupSize, const std::string& outputDir = "output") {
     PGMImage img;
     img.read(inname);
     std::ofstream stream(outname, std::ios::binary);
@@ -621,12 +751,12 @@ void encode(const std::string& inname, const std::string& outname, unsigned grou
     bs.addFixed<unsigned>(img.getHeight(), 16);
 
     EntropyEncoder eenc(bs, groupSize);
-    Prediction pred(img.getWidth(), img.getHeight(), img.getData(), false);
+    Prediction pred(img.getWidth(), img.getHeight(), img.getData(), false, outputDir);
     pred.subtractPrediction(eenc, groupSize);
     bs.byteAlign();
 }
 
-void decode(const std::string& inname, const std::string& outname, unsigned groupSize) {
+void decode(const std::string& inname, const std::string& outname, unsigned groupSize, const std::string& outputDir = "output") {
     std::ifstream stream(inname, std::ios::binary);
     IBitstream bs(stream);
     int width = bs.getFixed<unsigned>(16);
@@ -634,7 +764,7 @@ void decode(const std::string& inname, const std::string& outname, unsigned grou
 
     PGMImage img(width, height);
     EntropyDecoder edec(bs, groupSize);
-    Prediction pred(img.getWidth(), img.getHeight(), img.getData(), true);
+    Prediction pred(img.getWidth(), img.getHeight(), img.getData(), true, outputDir);
     pred.addPrediction(edec);
     img.write(outname);
 }
@@ -642,51 +772,34 @@ void decode(const std::string& inname, const std::string& outname, unsigned grou
 
 namespace fs = std::filesystem;
 
-int main() {
-    std::string inputFolder  = "kodak-pgm";
-    std::string outputFolder = "output";
 
-    std::vector<unsigned> groupSizes = {1, 2, 5, 10, 15, 20, 50, 100}; // Beispiel-Liste
-    std::ofstream report(outputFolder + "/bitrates.txt", std::ios::out);
-if (!report.is_open()) {
-    std::cerr << "Fehler: Konnte bitrates.txt nicht erstellen!" << std::endl;
-    return 1;
-}
+int main(int argc, char** argv)
+{
+    cmdPars pars;
 
-    for (unsigned gSize : groupSizes) {
-    std::cout << "\n=== Test mit Gruppengröße " << gSize << " ===\n";
-    report << "=== Gruppengröße " << gSize << " ===\n";
+    if (!readCmdLine(argc, argv, pars))
+        return 1;
 
-    for (const auto& entry : fs::directory_iterator(inputFolder)) {
-        if (entry.path().extension() == ".pgm") {
-            std::string baseName = entry.path().stem().string();
-            std::string encodedFile = outputFolder + "/" + baseName +
-                                      "_g" + std::to_string(gSize) + ".bin";
-            std::string decodedFile = outputFolder + "/" + baseName +
-                                      "_g" + std::to_string(gSize) + "_decoded.pgm";
+    fs::create_directories(pars.outdir);
 
-            // Encoding ...
-            encode(entry.path().string(), encodedFile, gSize);
+    std::string fullOutputPath = pars.outdir + "/" + pars.outname;
 
-            // Bitrate berechnen
-            uintmax_t fileSize = fs::file_size(encodedFile);
-            PGMImage img;
-            img.read(entry.path().string());
-            double bitrate = (fileSize * 8.0) / img.getSize();
+    unsigned groupSize = 1;
 
-            std::cout << baseName << " (g=" << gSize << "): "
-                      << std::fixed << std::setprecision(3)
-                      << bitrate << " bpp\n";
-
-            // In Datei schreiben
-            report << baseName << " (g=" << gSize << "): "
-                   << std::fixed << std::setprecision(3)
-                   << bitrate << " bpp\n";
-
-            // Decoding ...
-            decode(encodedFile, decodedFile, gSize);
+    try {
+        if (pars.decode) {
+            std::cout << "Dekodiere: " << pars.inname << " -> " << fullOutputPath << std::endl;
+            decode(pars.inname, fullOutputPath, groupSize, pars.outdir);
+        } else {
+            std::cout << "Kodiere: " << pars.inname << " -> " << fullOutputPath << std::endl;
+            encode(pars.inname, fullOutputPath, groupSize, pars.outdir);
         }
+        std::cout << "✅ Erfolgreich!" << std::endl;
     }
-}
+    catch (const std::exception& e) {
+        std::cerr << "Fehler: " << e.what() << std::endl;
+        return 1;
+    }
 
+    return 0;
 }
