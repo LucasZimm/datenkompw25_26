@@ -259,6 +259,15 @@ public:
         std::array<size_t, 256> histoB_ctx{};
         std::array<size_t, 256> histoC_ctx{};
         std::array<size_t, 256> histoD_ctx{};
+        // Kontext-Histogramme getrennt nach Error==0 / Error!=0
+        std::array<size_t, 256> histoA_ctx_err0{};
+        std::array<size_t, 256> histoB_ctx_err0{};
+        std::array<size_t, 256> histoC_ctx_err0{};
+        std::array<size_t, 256> histoD_ctx_err0{};
+        std::array<size_t, 256> histoA_ctx_errN{};
+        std::array<size_t, 256> histoB_ctx_errN{};
+        std::array<size_t, 256> histoC_ctx_errN{};
+        std::array<size_t, 256> histoD_ctx_errN{};
         // Fehler-Histogramme
         std::array<size_t, 511> histoA_err{};
         std::array<size_t, 511> histoB_err{};
@@ -392,6 +401,19 @@ public:
                 histoD_err[eD]++;   
                 histoAll_err[error_code + 255]++;               
 
+                // Zusätzliche Histogramme: A,B,C,D getrennt nach (error == 0) und (error != 0)
+                if (error_code == 0) {
+                    histoA_ctx_err0[uint8_t(a)]++;
+                    histoB_ctx_err0[uint8_t(b)]++;
+                    histoC_ctx_err0[uint8_t(c)]++;
+                    histoD_ctx_err0[uint8_t(d)]++;
+                } else {
+                    histoA_ctx_errN[uint8_t(a)]++;
+                    histoB_ctx_errN[uint8_t(b)]++;
+                    histoC_ctx_errN[uint8_t(c)]++;
+                    histoD_ctx_errN[uint8_t(d)]++;
+                }
+
                 // Debug-Ausgabe
                 if (debug == 1) {
                     writeDebugSubtract(y * m_width + x, x, y, a, b, c, d, g1, g2, g3, 
@@ -427,6 +449,16 @@ public:
         saveHistogram(histoC_ctx, "histoC_ctx");
         saveHistogram(histoD_ctx, "histoD_ctx");
 
+        // Kontext-Histogramme getrennt nach Error==0 / Error!=0 speichern
+        saveHistogram(histoA_ctx_err0, "histoA_ctx_err0");
+        saveHistogram(histoB_ctx_err0, "histoB_ctx_err0");
+        saveHistogram(histoC_ctx_err0, "histoC_ctx_err0");
+        saveHistogram(histoD_ctx_err0, "histoD_ctx_err0");
+        saveHistogram(histoA_ctx_errN, "histoA_ctx_errN");
+        saveHistogram(histoB_ctx_errN, "histoB_ctx_errN");
+        saveHistogram(histoC_ctx_errN, "histoC_ctx_errN");
+        saveHistogram(histoD_ctx_errN, "histoD_ctx_errN");
+ 
         // Fehler-Histogramme
         saveErrorHistogram(histoA_err, "histoA_err");
         saveErrorHistogram(histoB_err, "histoB_err");

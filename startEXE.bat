@@ -30,17 +30,21 @@ for %%E in (%BIN_DIR%\*.exe) do (
     REM Alle .pgm Dateien verarbeiten
     for %%F in (%INPUT_DIR%\*.pgm) do (
         set "INPUT_FILE=%%~fF"
-        set "ENCODE_FILE=%%~nF.bin"
-        set "DECODE_FILE=%%~nF.pgm"
+        set "BASENAME=%%~nF"
+        set "IMAGE_OUTPUT_DIR=!EXE_OUTPUT_DIR!\!BASENAME!"
+        if not exist "!IMAGE_OUTPUT_DIR!" mkdir "!IMAGE_OUTPUT_DIR!"
+
+        set "ENCODE_FILE=!BASENAME!.bin"
+        set "DECODE_FILE=!BASENAME!.pgm"
 
         echo   Kodieren: %%~nxF
-        "!EXE_PATH!" -e "!INPUT_FILE!" "!ENCODE_FILE!" "!EXE_OUTPUT_DIR!"
+        "!EXE_PATH!" -e "!INPUT_FILE!" "!ENCODE_FILE!" "!IMAGE_OUTPUT_DIR!"
 
         echo   Dekodieren: !ENCODE_FILE!
-        "!EXE_PATH!" -d "!EXE_OUTPUT_DIR!\!ENCODE_FILE!" "!DECODE_FILE!" "!EXE_OUTPUT_DIR!"
+        "!EXE_PATH!" -d "!IMAGE_OUTPUT_DIR!\!ENCODE_FILE!" "!DECODE_FILE!" "!IMAGE_OUTPUT_DIR!"
 
         REM Dateigröße der BIN holen
-        for %%S in ("!EXE_OUTPUT_DIR!\!ENCODE_FILE!") do set FILE_SIZE=%%~zS
+        for %%S in ("!IMAGE_OUTPUT_DIR!\!ENCODE_FILE!") do set FILE_SIZE=%%~zS
         echo   Dateigröße Bytes !FILE_SIZE!
 
         REM Breite und Höhe aus PGM lesen (2. Zeile mit Zahlen)
