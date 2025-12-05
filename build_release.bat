@@ -4,6 +4,7 @@ REM Build script (auto reconfigure for new cpp files)
 REM ================================================ 
 set PROJECT_ROOT=%~dp0 
 set BUILD_DIR=%~dp0/build
+set BIN_DIR=%~dp0/bin
 
 echo Project Root: %PROJECT_ROOT%
 
@@ -11,6 +12,9 @@ echo 🔧 Deleting old build
 
 if exist "%BUILD_DIR%" ( 
     rmdir /s /q "%BUILD_DIR%" 
+)
+if exist "%BIN_DIR%" ( 
+    rmdir /s /q "%BIN_DIR%" 
 )
 
 echo 🔄 Configuring CMake...
