@@ -219,7 +219,7 @@ public:
         
         for (auto& ctx : m_ctxs) {
             ctx.N = 1;
-            ctx.A = std::max(2, (width * height + 32) / 64);
+            ctx.A = std::max(2, (256 + 32) / 64);
             ctx.B = 0;
             ctx.C = 0;
         }
@@ -266,6 +266,10 @@ public:
         std::array<size_t, 256> histoB_ctx_err0{};
         std::array<size_t, 256> histoC_ctx_err0{};
         std::array<size_t, 256> histoD_ctx_err0{};
+        std::array<size_t, 256> histoA_ctx_err1{};
+        std::array<size_t, 256> histoB_ctx_err1{};
+        std::array<size_t, 256> histoC_ctx_err1{};
+        std::array<size_t, 256> histoD_ctx_err1{};
         std::array<size_t, 256> histoA_ctx_errN{};
         std::array<size_t, 256> histoB_ctx_errN{};
         std::array<size_t, 256> histoC_ctx_errN{};
@@ -276,6 +280,11 @@ public:
         std::array<size_t, 511> histoC_err{};
         std::array<size_t, 511> histoD_err{};
         std::array<size_t, 511> histoAll_err{};
+        // Fehler-Histogramme getrennt nach Error==0 / Error!=0
+
+
+
+
         // --------------------
         // MiniBilder
         // --------------------
@@ -326,7 +335,7 @@ public:
                     q3_norm = -q3;
                 }
 
-                int ctxIdx = (q1_norm) * 25 + (q2_norm) * 5 + (q3_norm);
+                int ctxIdx = (q1_norm) * 81 + (q2_norm) * 9 + (q3_norm);
                 ctxIdx = std::clamp(ctxIdx, 0, 364);
                 if (ctxIdx == 0) ctxIdx = 1;
 
@@ -410,10 +419,18 @@ public:
                     histoC_ctx_err0[uint8_t(c)]++;
                     histoD_ctx_err0[uint8_t(d)]++;
                 } else {
+                    if (std::abs(error_code) <= 1) {
+                        histoA_ctx_err1[uint8_t(a)]++;
+                        histoB_ctx_err1[uint8_t(b)]++;
+                        histoC_ctx_err1[uint8_t(c)]++;
+                        histoD_ctx_err1[uint8_t(d)]++;
+                    } else {
+                        // für Fehler > 1
                     histoA_ctx_errN[uint8_t(a)]++;
                     histoB_ctx_errN[uint8_t(b)]++;
                     histoC_ctx_errN[uint8_t(c)]++;
                     histoD_ctx_errN[uint8_t(d)]++;
+                }
                 }
 
                 // Debug-Ausgabe
@@ -456,6 +473,10 @@ public:
         saveHistogram(histoB_ctx_err0, "histoB_ctx_err0");
         saveHistogram(histoC_ctx_err0, "histoC_ctx_err0");
         saveHistogram(histoD_ctx_err0, "histoD_ctx_err0");
+        saveHistogram(histoA_ctx_err1, "histoA_ctx_err1");
+        saveHistogram(histoB_ctx_err1, "histoB_ctx_err1");
+        saveHistogram(histoC_ctx_err1, "histoC_ctx_err1");
+        saveHistogram(histoD_ctx_err1, "histoD_ctx_err1");
         saveHistogram(histoA_ctx_errN, "histoA_ctx_errN");
         saveHistogram(histoB_ctx_errN, "histoB_ctx_errN");
         saveHistogram(histoC_ctx_errN, "histoC_ctx_errN");
@@ -591,7 +612,7 @@ public:
                 q3_norm = -q3;
             }
 
-            int ctxIdx = (q1_norm) * 25 + (q2_norm) * 5 + (q3_norm);
+            int ctxIdx = (q1_norm) * 81 + (q2_norm) * 9 + (q3_norm);
             ctxIdx = std::clamp(ctxIdx, 0, 364);
             if (ctxIdx == 0) ctxIdx = 1;
 
@@ -713,16 +734,19 @@ private:
         // STEP 11: Zähler aktualisieren
         ctx.B += error;
         ctx.A += std::abs(error);
-        ctx.N += 1;
-        
-        // Reset-Schwellenwert (Lmax-Äquivalent)
-        const int N_RESET = 640;
+
+        // Reset-Schwellenwert
+        const int N_RESET = 64;
         if (ctx.N >= N_RESET) {
-            ctx.N >>= 1;
             ctx.A >>= 1;
-            ctx.B >>= 1;
+            if (ctx.B >= 0)
+                ctx.B >>= 1;
+            else
+                ctx.B = -((1-ctx.B) >> 1);
+            ctx.N >>= 1;
         }
-        
+        ctx.N += 1;
+
         // STEP 12: B und C aktualisieren nach LOCO-I Schema
         if (ctx.B <= -ctx.N) {
             ctx.C -= 1;
@@ -737,15 +761,18 @@ private:
         // C clampen
         ctx.C = std::clamp(ctx.C, -128, 127);
     }
-    inline int quantize(int gradient) const
+    inline int quantize(int grad) const
     {
-        if (gradient == 0) return 0;
-        int sign = (gradient < 0) ? -1 : 1;
-        int a = std::abs(gradient);
-        if (a <= 2)   return sign * 1;
-        if (a <= 6)   return sign * 2;
-        if (a <= 20)  return sign * 3;
-        return sign * 4;
+        int T1 = 3, T2 = 7, T3 = 21;
+        if (grad <= -T3) return -4;
+        else if (grad <= -T2) return -3;
+        else if (grad <= -T1) return -2;
+        else if (grad < 0)    return -1;
+        else if (grad == 0)   return 0;
+        else if (grad < T1)   return 1;
+        else if (grad < T2)   return 2;
+        else if (grad < T3)   return 3;
+        else                  return 4;
     }
 
 private:
