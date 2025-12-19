@@ -101,20 +101,19 @@ class EntropyCoderBase
 protected:
     EntropyCoderBase(unsigned groupSize) : GROUP_SIZE(groupSize)
     {
+        // Initialize PMF contexts with small non-zero priors to avoid zero-probability issues
         for (auto &ctx : m_pmfAbsCtx) {
-            for (auto &p : ctx) p = 0;
+            for (auto &p : ctx) p = 1;
         }
     }
 
 protected:
     static const unsigned N = 3;
-    static const unsigned NUM_CTX = 365;
+    static const unsigned NUM_CTX = 256+256+256+256; // Anzahl der Kontexte für A,B,C,D
     unsigned GROUP_SIZE; // jetzt variabel
     std::array<std::array<uint8_t, N>, NUM_CTX> m_pmfAbsCtx;
 
     inline unsigned mappedCtx(unsigned ctxIdx) const {
-        //if (ctxIdx >= NUM_CTX) ctxIdx = NUM_CTX - 1;
-        //return (ctxIdx / GROUP_SIZE) * GROUP_SIZE;
         ctxIdx = 1;
         return ctxIdx;
     }
@@ -307,6 +306,11 @@ public:
                     if (xx >= m_width || yy >= m_height) return 0;
                     return int(orgData[yy * m_width + xx]);
                 };
+                auto folderrget = [&](int xx, int yy) -> int {
+                    if (xx < 0 || yy < 0) return 0;
+                    if (xx >= m_width || yy >= m_height) return 0;
+                    return int(data[yy * m_width + xx]);
+                };
 
                 int a = get(x - 1, y);     // left
                 int b = get(x,     y - 1); // up
@@ -376,10 +380,12 @@ public:
 
 
                 int error_code = actual - pred_corr;
+                // Residuum speichern für Diagnose
                 residualRaw[y * m_width + x] = static_cast<int16_t>(error_code);
 
                 // Modulo-Faltung des Fehlers
-                int e_fold = ((error_code % 256) + 256) % 256;
+                int e_fold = error_code;
+                if (e_fold < 0) e_fold += 256;
                 if (e_fold >= 128) e_fold -= 256;
 
                 // Gefaltetes Residuum speichern
@@ -387,8 +393,14 @@ public:
                     std::clamp(e_fold, -128, 127)
                 );
 
+                // Kontextmodell für CABAC
+                int a_folderrget = folderrget(x - 1, y);
+                int b_folderrget = folderrget(x, y - 1);
+                int c_folderrget = folderrget(x - 1, y - 1);
+                int d_folderrget = folderrget(x + 1, y - 1);
+                int model = contextModel(a_folderrget, b_folderrget, c_folderrget, d_folderrget);
                 // Codieren mit CABAC
-                eenc.encodeSample(static_cast<PGMImage::Sample>(e_fold), ctxIdx);
+                eenc.encodeSample(static_cast<PGMImage::Sample>(e_fold), model);
 
                 // Residuen-Statistiken
                 if (error_code == 0) zero_residuals++;
@@ -506,15 +518,18 @@ public:
         auto saveRawPGM3color = [&](const std::string& filename) {
             std::ofstream out(filename, std::ios::binary);
             if (!out.is_open()) return;
-
-            out << "P5\n" << m_width << " " << m_height << "\n255\n";
+            // Write a simple P6 (RGB) image where each channel gets the same mapped value
+            out << "P6\n" << m_width << " " << m_height << "\n255\n";
             for (int i = 0; i < m_width * m_height; ++i) {
                 int e = std::clamp<int>(residualRaw[i], -128, 127);
                 uint8_t v;
-                if (abs(e) <= 1) v = 0;
-                else if (abs(e) > 1 && abs(e) <= 127) v = 127;
+                if (std::abs(e) <= 1) v = 0;
+                else if (std::abs(e) > 1 && std::abs(e) <= 127) v = 127;
                 else v = 255;
-                out.write(reinterpret_cast<const char*>(&v), 1);
+                // write RGB triple
+                out.put(static_cast<char>(v));
+                out.put(static_cast<char>(v));
+                out.put(static_cast<char>(v));
             }
         };
 
@@ -573,6 +588,8 @@ public:
 {
     // Temporären Puffer für rekonstruierte Daten erstellen
     std::vector<PGMImage::Sample> tempData(m_data.size());
+    std::vector<int16_t> data(m_width * m_height);
+
     int debug = 1;
     for (int y = 0; y < m_height; ++y)
     {
@@ -583,6 +600,11 @@ public:
                 if (xx < 0 || yy < 0) return 0;
                 if (xx >= m_width || yy >= m_height) return 0;
                 return int(tempData[yy * m_width + xx]);
+            };
+            auto folderrget = [&](int xx, int yy) -> int {
+                if (xx < 0 || yy < 0) return 0;
+                if (xx >= m_width || yy >= m_height) return 0;
+                return int(data[yy * m_width + xx]);
             };
 
             int a = get(x - 1, y);     // left
@@ -635,13 +657,26 @@ public:
                 pred_corr -= ctx.C;
             pred_corr = std::clamp(pred_corr, 0, 255);
 
+            // Kontextmodell für CABAC
+            int a_folderrget = folderrget(x - 1, y);
+            int b_folderrget = folderrget(x, y - 1);
+            int c_folderrget = folderrget(x - 1, y - 1);
+            int d_folderrget = folderrget(x + 1, y - 1);
+            int model = contextModel(a_folderrget, b_folderrget, c_folderrget, d_folderrget);
             // STEP 7: Residuum direkt vom Decoder holen
-            int e_fold = edec.decodeSample(ctxIdx);
+            int e_fold = edec.decodeSample(model);
                       
-            // Rekonstruktion mit modulo-Addition
-            int reconstructed = (pred_corr + e_fold) & 0xFF;
-            tempData[y * m_width + x] = static_cast<PGMImage::Sample>(reconstructed);      
+            // Gefaltetes Residuum speichern
+            data[y * m_width + x] = static_cast<PGMImage::Sample>(
+                std::clamp(e_fold, -128, 127)
+            );
 
+
+            // Rekonstruktion mit modulo-Addition
+            int reconstructed = (pred_corr + e_fold);
+            if (reconstructed < 0) reconstructed += 256;
+            else if (reconstructed >= 256) reconstructed -= 256;
+            tempData[y * m_width + x] = static_cast<PGMImage::Sample>(reconstructed);   
             // echten Fehler für Kontextupdate neu berechnen
             int error_code = reconstructed - pred_corr;
             int error_ctx = (sign < 0) ? -error_code : error_code;
@@ -775,6 +810,11 @@ private:
         else                  return 4;
     }
 
+    int contextModel( int a, int b, int c, int d) const
+    {
+        return  (abs(a)+abs(b)+abs(c)+abs(d)); // Summe der Nachbarn
+    }
+
 private:
     // Debug-Streams
     std::ofstream m_encDebugFile;
@@ -805,7 +845,10 @@ private:
 void encode(const std::string& inname, const std::string& outname, unsigned groupSize, const std::string& outputDir = "output") {
     PGMImage img;
     img.read(inname);
-    std::ofstream stream(outname, std::ios::binary);
+    // Ensure output directory exists and write the encoded file into it (so batch scripts find it)
+    std::filesystem::create_directories(outputDir);
+    const std::filesystem::path outpath = std::filesystem::path(outputDir) / outname;
+    std::ofstream stream(outpath, std::ios::binary);
     OBitstream bs(stream);
 
     bs.addFixed<unsigned>(img.getWidth(), 16);
@@ -827,11 +870,11 @@ void decode(const std::string& inname, const std::string& outname, unsigned grou
     EntropyDecoder edec(bs, groupSize);
     Prediction pred(img.getWidth(), img.getHeight(), img.getData(), true, outputDir);
     pred.addPrediction(edec);
-    img.write(outname);
+    // Ensure output dir exists and write decoded image into it
+    std::filesystem::create_directories(outputDir);
+    const std::filesystem::path outpath = std::filesystem::path(outputDir) / outname;
+    img.write(outpath.string());
 }
-
-
-namespace fs = std::filesystem;
 
 
 int main(int argc, char** argv)
