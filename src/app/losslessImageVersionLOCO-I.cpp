@@ -340,8 +340,8 @@ public:
                 }
 
                 int ctxIdx = (q1_norm) * 81 + (q2_norm) * 9 + (q3_norm);
-                ctxIdx = std::clamp(ctxIdx, 0, 364);
-                if (ctxIdx == 0) ctxIdx = 1;
+                //ctxIdx = std::clamp(ctxIdx, 0, 364);
+                //if (ctxIdx == 0) ctxIdx = 1;
 
 
 
@@ -635,8 +635,8 @@ public:
             }
 
             int ctxIdx = (q1_norm) * 81 + (q2_norm) * 9 + (q3_norm);
-            ctxIdx = std::clamp(ctxIdx, 0, 364);
-            if (ctxIdx == 0) ctxIdx = 1;
+            //ctxIdx = std::clamp(ctxIdx, 0, 364);
+            //if (ctxIdx == 0) ctxIdx = 1;
 
             Context& ctx = m_ctxs[ctxIdx];
 
