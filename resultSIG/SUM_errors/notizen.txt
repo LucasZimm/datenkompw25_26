@@ -1,0 +1,17 @@
+Im bereich der Summe mit 9-16 am meisten Gewinn
+1-2 Schwellen sehr wenig Gewinn
+4 Schwellen zeigt bei Schwellen mit 3 Distanz also z.B. für 9 -> 9 12 15 18 den meisten Gewinn
+
+
+Algo für z.B. 4 Schwellen:
+
+    int sum = std::abs(a_err) + std::abs(b_err) + std::abs(c_err) + std::abs(d_err);
+    int T0 = 0, T1 = 1, T2 = 2, T3 = 3; 
+    int add = 0; // Optionaler Offset, z.B. um die Verteilung zu verschieben
+    int dist = 3; // Optionaler Distanzfaktor, z.B. um die Verteilung zu strecken
+    T0 = T0 * dist + add; T1 = T1 * dist + add; T2 = T2 * dist + add; T3 = T3 * dist + add;
+    if (sum > T3) return 4;
+    if (sum > T2) return 3;
+    if (sum > T1) return 2;
+    if (sum > T0) return 1;
+    return 0;

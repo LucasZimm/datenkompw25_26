@@ -1,0 +1,9 @@
+Algo:
+
+    int T = 1;
+    int idx = 0;
+    if (a_err > T) idx |= 0x01;
+    if (b_err > T) idx |= 0x02;
+    if (c_err > T) idx |= 0x04;
+    if (d_err > T) idx |= 0x08;
+    return idx;
