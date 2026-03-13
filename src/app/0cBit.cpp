@@ -132,11 +132,11 @@ bool readCmdLine(int argc, char** argv, cmdPars& pars)
 //
 //======================================================
 int g_threshold1 =  1;
-int g_threshold2 =  4;
+int g_threshold2 =  3;
 int g_threshold3 =  8;
-int g_threshold4 = 16;
-int g_threshold5 = 32;
-int g_threshold6 = 64;
+int g_threshold4 = 14;
+int g_threshold5 = 29;
+int g_threshold6 = 61;
 std::ofstream g_bpp_results_file;
 
 
@@ -156,11 +156,60 @@ protected:
     std::array<std::array<uint8_t, N>, NUM_CTX> m_pmfAbsCtx;
     std::array<uint8_t, NUM_CTX> m_pmfSignCtx;
     std::array<uint8_t, NUM_CTX> m_pmfSigCtx;
+    std::array<uint8_t, NUM_CTX> m_pmfGt1Ctx;
 
     inline unsigned mappedCtx(unsigned ctxIdx) const {
         ctxIdx = 1;
         return ctxIdx;
     }
+    
+    static inline unsigned get_gt1_index(int a_err, int b_err, int c_err, int d_err)
+    {
+        const int T1 = 1;
+        const int T2 = 3;
+        const int T3 = 8;
+        const int T4 = 14;
+        const int T5 = 29;
+        const int T6 = 61;
+
+        int sum = std::abs(a_err) +
+                  std::abs(b_err) +
+                  std::abs(c_err) +
+                  std::abs(d_err);
+
+        if (sum <= T1) return 0;
+        else if (sum <= T2) return 1;
+        else if (sum <= T3) return 2;
+        else if (sum <= T4) return 3;
+        else if (sum <= T5) return 4;
+        else if (sum <= T6) return 5;
+        else return 6;
+    }
+
+    static inline unsigned get_gtN_index(int a_err, int b_err, int c_err, int d_err)
+    {
+        const int T1 = 1;
+        const int T2 = 3;
+        const int T3 = 8;
+        const int T4 = 14;
+        const int T5 = 29;
+        const int T6 = 61;
+    
+        int sum = std::abs(a_err) +
+                  std::abs(b_err) +
+                  std::abs(c_err) +
+                  std::abs(d_err);
+    
+        if (sum <= T1) return 0;
+        else if (sum <= T2) return 1;
+        else if (sum <= T3) return 2;
+        else if (sum <= T4) return 3;
+        else if (sum <= T5) return 4;
+        else if (sum <= T6) return 5;
+        else return 6;
+    }
+
+
 
 public:
     EntropyCoderBase(unsigned groupSize)
@@ -170,6 +219,7 @@ public:
             for (auto& p : ctx) p = 0;
         for (auto& p : m_pmfSignCtx) p = 0;
         for (auto& p : m_pmfSigCtx)  p = 0;
+        for (auto& p : m_pmfGt1Ctx)  p = 0;
     }
 };
 
@@ -181,7 +231,7 @@ public:
         : EntropyCoderBase(groupSize), aenc(bs)
     { aenc.start(); }
 
-    void encodeSample(PGMImage::Sample s, unsigned ctxIdx, unsigned sigIdx);
+    void encodeSample(PGMImage::Sample s, unsigned ctxIdx, unsigned sigIdx, int a_err, int b_err, int c_err, int d_err);
     void finish() { aenc.finish(); }
 
 private:
@@ -196,42 +246,61 @@ public:
         : EntropyCoderBase(groupSize), adec(bs)
     { adec.start(); }
 
-    PGMImage::Sample decodeSample(unsigned ctxIdx, unsigned sigIdx);
+    PGMImage::Sample decodeSample(unsigned ctxIdx, unsigned sigIdx, int a_err, int b_err, int c_err, int d_err);
 
 private:
     ArithmeticDecoder adec;
 };
 
 
-void EntropyEncoder::encodeSample(PGMImage::Sample s, unsigned ctxIdx, unsigned sigIdx)
+void EntropyEncoder::encodeSample(PGMImage::Sample s, unsigned ctxIdx, unsigned sigIdx, int a_err, int b_err, int c_err, int d_err)
 {
     unsigned absValue = unsigned(s < 0 ? -s : s);
     unsigned mIdx = mappedCtx(ctxIdx);
-
+    mIdx = mIdx+1;
     bool nonZero = (absValue != 0);
     aenc.encBin(m_pmfSigCtx[sigIdx], nonZero);
     if (!nonZero) return;
 
     aenc.encBit(s < 0);
 
-    unsigned rem = absValue - 1;
-    unsigned binIdx = 1;
-    while (rem--)
-        aenc.encBin(m_pmfAbsCtx[mIdx][std::min<unsigned>(N-1, binIdx++)], 1);
-    aenc.encBin(m_pmfAbsCtx[mIdx][std::min<unsigned>(N-1, binIdx++)], 0);
+    unsigned binIdx = 2;
+    bool gt1 = (absValue > 1);
+    unsigned gt1Idx = get_gt1_index(a_err, b_err, c_err, d_err);
+    aenc.encBin(m_pmfGt1Ctx[gt1Idx], gt1);
+
+    unsigned gtNIdx = get_gtN_index(a_err, b_err, c_err, d_err);
+    if (gt1) {
+        unsigned rem = absValue - 2;
+        while (rem--)
+            aenc.encBin(m_pmfAbsCtx[gtNIdx][std::min<unsigned>(N-1, binIdx++)], 1);
+        aenc.encBin(m_pmfAbsCtx[gtNIdx][std::min<unsigned>(N-1, binIdx++)], 0);
+    }
 }
 
 
-PGMImage::Sample EntropyDecoder::decodeSample(unsigned ctxIdx, unsigned sigIdx)
+PGMImage::Sample EntropyDecoder::decodeSample(unsigned ctxIdx, unsigned sigIdx,
+                                               int a_err, int b_err, int c_err, int d_err)
 {
     unsigned mIdx = mappedCtx(ctxIdx);
-    if (!adec.decBin(m_pmfSigCtx[sigIdx])) return 0;
+    mIdx = mIdx+1;
+    if (!adec.decBin(m_pmfSigCtx[sigIdx]))
+        return 0;
 
     bool sign = adec.decBit();
-    unsigned mag = 0, binIdx = 1;
-    while (adec.decBin(m_pmfAbsCtx[mIdx][std::min<unsigned>(N-1, binIdx++)]))
-        mag++;
-    mag += 1;
+
+    unsigned gt1Idx = get_gt1_index(a_err, b_err, c_err, d_err);
+    bool gt1 = adec.decBin(m_pmfGt1Ctx[gt1Idx]);
+
+    unsigned mag = 1;
+    unsigned binIdx = 2;
+
+    unsigned gtNIdx = get_gtN_index(a_err, b_err, c_err, d_err);
+    if (gt1) {
+        mag = 2;
+        while (adec.decBin(m_pmfAbsCtx[gtNIdx][std::min<unsigned>(N-1, binIdx++)]))
+            mag++;
+    }
 
     return sign ? -PGMImage::Sample(mag) : PGMImage::Sample(mag);
 }
@@ -253,17 +322,26 @@ inline unsigned compute_significant_Idx(
     int a_err, int b_err, int c_err, int d_err,
     int /*a*/, int /*b*/, int /*c*/, int /*d*/)
 {
-    int sum = std::abs(a_err) + std::abs(b_err) + std::abs(c_err) + std::abs(d_err);
+    const int T1 = 1;
+    const int T2 = 3;
+    const int T3 = 8;
+    const int T4 = 14;
+    const int T5 = 29;
+    const int T6 = 61;
 
-    if (sum <= g_threshold1) return 0;
-    if (sum <= g_threshold2) return 1;
-    if (sum <= g_threshold3) return 2;
-    if (sum <= g_threshold4) return 3;
-    if (sum <= g_threshold5) return 4;
-    if (sum <= g_threshold6) return 5;
-    return 6;
+    int sum = std::abs(a_err) +
+              std::abs(b_err) +
+              std::abs(c_err) +
+              std::abs(d_err);
+
+    if (sum <= T1) return 0;
+    else if (sum <= T2) return 1;
+    else if (sum <= T3) return 2;
+    else if (sum <= T4) return 3;
+    else if (sum <= T5) return 4;
+    else if (sum <= T6) return 5;
+    else return 6;
 }
-
 
 //======================================================
 //
@@ -359,7 +437,7 @@ public:
                 int model    = contextModel(fe_a, fe_b, fe_c, fe_d);
                 unsigned sig = compute_significant_Idx(q1,q2,q3, fe_a,fe_b,fe_c,fe_d, a,b,c,d);
 
-                eenc.encodeSample(static_cast<PGMImage::Sample>(e_fold), model, sig);
+                eenc.encodeSample(static_cast<PGMImage::Sample>(e_fold), model, sig, fe_a, fe_b, fe_c, fe_d );
 
                 if (error_code == 0)           zero_residuals++;
                 if (std::abs(error_code) <= 1) small_residuals++;
@@ -431,7 +509,7 @@ public:
                 int model    = contextModel(fe_a, fe_b, fe_c, fe_d);
                 unsigned sig = compute_significant_Idx(q1,q2,q3, fe_a,fe_b,fe_c,fe_d, a,b,c,d);
 
-                int e_fold = edec.decodeSample(model, sig);
+                int e_fold = edec.decodeSample(model, sig, fe_a, fe_b, fe_c, fe_d);
                 data[y * m_width + x] = static_cast<PGMImage::Sample>(std::clamp(e_fold, -128, 127));
 
                 int reconstructed = pred_corr + e_fold;
