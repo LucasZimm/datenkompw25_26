@@ -1,0 +1,75 @@
+================================
+Durchschnittliche BPP pro Codec
+================================
+
+Test generell:
+
+pgm : 8,000 BPP
+0cBit : 4,407 BPP (alter Wert)
+0cBitGol2GT128 : 4,407 BPP
+0cBitGol2GT32 : 4,458 BPP
+0cBitGol2GT64 : 4,417 BPP
+0cBitGol2GT8 : 4,612 BPP
+0cBitGolGT2 : 4,705 BPP
+0cBitGolGT4 : 4,675 BPP
+
+
+kurzer Test Ex-Golomb adaptiv
+
+0cBitGolGT4 : 4,675 BPP
+0cBitGolGT4adp : 4,543 BPP
+
+Test Sprung zwischen:
+
+pgm : 8,000 BPP
+0cBit : 4,407 BPP
+0cBitGolJumpadapt128 : 4,418 BPP
+0cBitGolJumpadapt16 : 4,613 BPP
+0cBitGolJumpadapt32 : 4,530 BPP
+0cBitGolJumpadapt64 : 4,455 BPP
+0cBitGolJumpadapt8 : 4,669 BPP
+0cBitGolJumpadapt96 : 4,429 BPP
+
+
+
+Code Ex-Golomb:
+
+
+void EntropyEncoder::ex_golomb_rice_encode(unsigned n, unsigned gtNIdx, unsigned binIdx)
+{
+    int p = (int)std::floor(std::log2((double)(n + 1)));
+
+    for (int i = 0; i < p; i++)
+        aenc.encBin(m_pmfExpCtx[gtNIdx][std::min<unsigned>(N-1, binIdx++)], 1);
+    aenc.encBin(m_pmfExpCtx[gtNIdx][std::min<unsigned>(N-1, binIdx++)], 0);
+
+    if (p > 0) {
+        unsigned suffix = n - ((1 << p) - 1);
+        aenc.encBits(suffix, p);
+    }
+}
+
+void EntropyDecoder::ex_golomb_rice_decode(unsigned& n, unsigned gtNIdx, unsigned binIdx)
+{
+    int p = 0;
+    while (adec.decBin(m_pmfExpCtx[gtNIdx][std::min<unsigned>(N-1, binIdx++)])) {
+        p++;
+    }
+
+    if (p > 0) {
+        unsigned suffix = adec.decBits(p);
+        n = (1 << p) - 1 + suffix;
+    } else {
+        n = 0;
+    }
+}
+
+Test GTN mit Variabler Schwelle (3 Schwellen)
+
+0cBit : 4,407 BPP
+0cBitGTNVar : 4,405 BPP
+
+6 Schwellen
+
+0cBit : 4,407 BPP
+0cBitGTNVar : 4,404 BPP
