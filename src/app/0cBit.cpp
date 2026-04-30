@@ -25,19 +25,17 @@ namespace fs = std::filesystem;
 //   C O M M A N D    L I N E   P A R A M E T E R S
 //
 //======================================================
-// Genau 6 Schwellen => 7 Klassen fuer compute_significant_Idx
+// Je 6 Schwellen fuer GT1 und GTN => je 7 Klassen
 struct cmdPars
 {
     bool        decode;
     std::string inname;
     std::string outname;
     std::string outdir;
-    int         threshold1;
-    int         threshold2;
-    int         threshold3;
-    int         threshold4;
-    int         threshold5;
-    int         threshold6;
+    // GT1-Schwellen
+    int gt1_t1, gt1_t2, gt1_t3, gt1_t4, gt1_t5, gt1_t6;
+    // GTN-Schwellen
+    int gtn_t1, gtn_t2, gtn_t3, gtn_t4, gtn_t5, gtn_t6;
 };
 
 
@@ -77,8 +75,8 @@ bool readCmdLine(int argc, char** argv, cmdPars& pars)
         if (argc > ++arg) {
             try {
                 dest = std::stoi(argv[arg]);
-                if (dest < 1 || dest > 1023) {
-                    err << "ERROR: " << name << " must be between 1 and 1023." << std::endl;
+                if (dest < 1 || dest > 99999) {
+                    err << "ERROR: " << name << " must be between 1 and 99999." << std::endl;
                     ok = false;
                 }
             } catch (...) {
@@ -90,24 +88,48 @@ bool readCmdLine(int argc, char** argv, cmdPars& pars)
         }
     };
 
-    // Alle 6 Schwellen sind Pflicht (Default = bestes Log-Ergebnis)
-    readOptInt(pars.threshold1,  1, "Threshold1");
-    readOptInt(pars.threshold2,  4, "Threshold2");
-    readOptInt(pars.threshold3,  8, "Threshold3");
-    readOptInt(pars.threshold4, 16, "Threshold4");
-    readOptInt(pars.threshold5, 32, "Threshold5");
-    readOptInt(pars.threshold6, 64, "Threshold6");
+    // GT1-Schwellen (Default: binaer 1,2,4,8,16,32)
+    readOptInt(pars.gt1_t1,  1, "GT1_Threshold1");
+    readOptInt(pars.gt1_t2,  2, "GT1_Threshold2");
+    readOptInt(pars.gt1_t3,  4, "GT1_Threshold3");
+    readOptInt(pars.gt1_t4,  8, "GT1_Threshold4");
+    readOptInt(pars.gt1_t5, 16, "GT1_Threshold5");
+    readOptInt(pars.gt1_t6, 32, "GT1_Threshold6");
 
-    // Validierung: streng aufsteigend
+    // GTN-Schwellen (Default: binaer 1,2,4,8,16,32)
+    readOptInt(pars.gtn_t1,  1, "GTN_Threshold1");
+    readOptInt(pars.gtn_t2,  2, "GTN_Threshold2");
+    readOptInt(pars.gtn_t3,  4, "GTN_Threshold3");
+    readOptInt(pars.gtn_t4,  8, "GTN_Threshold4");
+    readOptInt(pars.gtn_t5, 16, "GTN_Threshold5");
+    readOptInt(pars.gtn_t6, 32, "GTN_Threshold6");
+
+    // Validierung GT1: streng aufsteigend
     if (ok) {
         int vals[6] = {
-            pars.threshold1, pars.threshold2, pars.threshold3,
-            pars.threshold4, pars.threshold5, pars.threshold6
+            pars.gt1_t1, pars.gt1_t2, pars.gt1_t3,
+            pars.gt1_t4, pars.gt1_t5, pars.gt1_t6
         };
         for (int i = 1; i < 6; i++) {
             if (vals[i] <= vals[i-1]) {
-                err << "ERROR: Schwellen muessen streng aufsteigend sein: t"
-                    << i << "=" << vals[i-1] << " >= t" << (i+1) << "=" << vals[i] << std::endl;
+                err << "ERROR: GT1-Schwellen muessen streng aufsteigend sein: gt1_t"
+                    << i << "=" << vals[i-1] << " >= gt1_t" << (i+1) << "=" << vals[i] << std::endl;
+                ok = false;
+                break;
+            }
+        }
+    }
+
+    // Validierung GTN: streng aufsteigend
+    if (ok) {
+        int vals[6] = {
+            pars.gtn_t1, pars.gtn_t2, pars.gtn_t3,
+            pars.gtn_t4, pars.gtn_t5, pars.gtn_t6
+        };
+        for (int i = 1; i < 6; i++) {
+            if (vals[i] <= vals[i-1]) {
+                err << "ERROR: GTN-Schwellen muessen streng aufsteigend sein: gtn_t"
+                    << i << "=" << vals[i-1] << " >= gtn_t" << (i+1) << "=" << vals[i] << std::endl;
                 ok = false;
                 break;
             }
@@ -118,8 +140,10 @@ bool readCmdLine(int argc, char** argv, cmdPars& pars)
         std::string pname = argv[0];
         std::cerr << err.str() << std::endl;
         std::cerr << "Usage: " << pname
-                  << " -e|-d inFile outFile [outputDir] [t1] [t2] [t3] [t4] [t5] [t6]" << std::endl;
-        std::cerr << "  t1..t6: 1-1023, streng aufsteigend, Default: 1 4 8 16 32 64" << std::endl;
+                  << " -e|-d inFile outFile [outputDir]"
+                  << " [gt1_t1..gt1_t6] [gtn_t1..gtn_t6]" << std::endl;
+        std::cerr << "  GT1 t1..t6: 1-99999, streng aufsteigend, Default: 1 2 4 8 16 32" << std::endl;
+        std::cerr << "  GTN t1..t6: 1-99999, streng aufsteigend, Default: 1 2 4 8 16 32" << std::endl;
         return false;
     }
     return true;
@@ -131,12 +155,14 @@ bool readCmdLine(int argc, char** argv, cmdPars& pars)
 //   G L O B A L E   T E S T P A R A M E T E R
 //
 //======================================================
-int g_threshold1 =  1;
-int g_threshold2 =  3;
-int g_threshold3 =  8;
-int g_threshold4 = 14;
-int g_threshold5 = 29;
-int g_threshold6 = 61;
+// GT1-Schwellen
+int g_gt1_t1 =  1, g_gt1_t2 =  2, g_gt1_t3 =  4;
+int g_gt1_t4 =  8, g_gt1_t5 = 16, g_gt1_t6 = 32;
+
+// GTN-Schwellen
+int g_gtn_t1 =  1, g_gtn_t2 =  2, g_gtn_t3 =  4;
+int g_gtn_t4 =  8, g_gtn_t5 = 16, g_gtn_t6 = 32;
+
 std::ofstream g_bpp_results_file;
 
 
@@ -162,53 +188,51 @@ protected:
         ctxIdx = 1;
         return ctxIdx;
     }
-    
+
     static inline unsigned get_gt1_index(int a_err, int b_err, int c_err, int d_err)
     {
-        const int T1 = 1;
-        const int T2 = 3;
-        const int T3 = 8;
-        const int T4 = 14;
-        const int T5 = 29;
-        const int T6 = 61;
-
         int sum = std::abs(a_err) +
                   std::abs(b_err) +
                   std::abs(c_err) +
                   std::abs(d_err);
 
-        if (sum <= T1) return 0;
-        else if (sum <= T2) return 1;
-        else if (sum <= T3) return 2;
-        else if (sum <= T4) return 3;
-        else if (sum <= T5) return 4;
-        else if (sum <= T6) return 5;
-        else return 6;
+        if      (sum <= 1) return 0;
+        else if (sum <= 5) return 1;
+        else if (sum <= 10) return 2;
+        else if (sum <= 17) return 3;
+        else if (sum <= 29) return 4;
+        else if (sum <= 61) return 5;
+        else                return 6;
     }
 
     static inline unsigned get_gtN_index(int a_err, int b_err, int c_err, int d_err)
     {
-        const int T1 = 1;
-        const int T2 = 3;
-        const int T3 = 8;
-        const int T4 = 14;
-        const int T5 = 29;
-        const int T6 = 61;
-    
         int sum = std::abs(a_err) +
                   std::abs(b_err) +
                   std::abs(c_err) +
                   std::abs(d_err);
-    
-        if (sum <= T1) return 0;
-        else if (sum <= T2) return 1;
-        else if (sum <= T3) return 2;
-        else if (sum <= T4) return 3;
-        else if (sum <= T5) return 4;
-        else if (sum <= T6) return 5;
-        else return 6;
+
+        if      (sum <= 8)  return 0;
+        else if (sum <= 16) return 1;
+        else if (sum <= 32) return 2;
+        else                return 6;
     }
 
+    static inline unsigned get_sign_index(int a_err, int b_err, int c_err, int d_err)
+    {
+        int sum = std::abs(a_err) +
+                  std::abs(b_err) +
+                  std::abs(c_err) +
+                  std::abs(d_err);
+
+        if      (sum <= 1) return 0;
+        else if (sum <= 2) return 1;
+        else if (sum <= 4) return 2;
+        else if (sum <= 8) return 3;
+        else if (sum <= 16) return 4;
+        else if (sum <= 32) return 5;
+        else                return 6;
+    }
 
 
 public:
@@ -262,6 +286,7 @@ void EntropyEncoder::encodeSample(PGMImage::Sample s, unsigned ctxIdx, unsigned 
     aenc.encBin(m_pmfSigCtx[sigIdx], nonZero);
     if (!nonZero) return;
 
+    //unsigned signCtx = get_sign_index(a_err, b_err, c_err, d_err);
     aenc.encBit(s < 0);
 
     unsigned binIdx = 2;
@@ -287,6 +312,7 @@ PGMImage::Sample EntropyDecoder::decodeSample(unsigned ctxIdx, unsigned sigIdx,
     if (!adec.decBin(m_pmfSigCtx[sigIdx]))
         return 0;
 
+    // unsigned signCtx = get_sign_index(a_err, b_err, c_err, d_err);
     bool sign = adec.decBit();
 
     unsigned gt1Idx = get_gt1_index(a_err, b_err, c_err, d_err);
@@ -404,9 +430,9 @@ public:
                 int q1 = quantize(g1), q2 = quantize(g2), q3 = quantize(g3);
 
                 int sign = 1;
-                if      (q1 < 0)                       sign = -1;
-                else if (q1 == 0 && q2 < 0)            sign = -1;
-                else if (q1 == 0 && q2 == 0 && q3 < 0) sign = -1;
+                if      (q1 < 0)                        sign = -1;
+                else if (q1 == 0 && q2 < 0)             sign = -1;
+                else if (q1 == 0 && q2 == 0 && q3 < 0)  sign = -1;
 
                 int q1_n = q1, q2_n = q2, q3_n = q3;
                 if (sign < 0) { q1_n = -q1; q2_n = -q2; q3_n = -q3; }
@@ -437,7 +463,7 @@ public:
                 int model    = contextModel(fe_a, fe_b, fe_c, fe_d);
                 unsigned sig = compute_significant_Idx(q1,q2,q3, fe_a,fe_b,fe_c,fe_d, a,b,c,d);
 
-                eenc.encodeSample(static_cast<PGMImage::Sample>(e_fold), model, sig, fe_a, fe_b, fe_c, fe_d );
+                eenc.encodeSample(static_cast<PGMImage::Sample>(e_fold), model, sig, fe_a, fe_b, fe_c, fe_d);
 
                 if (error_code == 0)           zero_residuals++;
                 if (std::abs(error_code) <= 1) small_residuals++;
@@ -486,9 +512,9 @@ public:
                 int q1 = quantize(g1), q2 = quantize(g2), q3 = quantize(g3);
 
                 int sign = 1;
-                if      (q1 < 0)                       sign = -1;
-                else if (q1 == 0 && q2 < 0)            sign = -1;
-                else if (q1 == 0 && q2 == 0 && q3 < 0) sign = -1;
+                if      (q1 < 0)                        sign = -1;
+                else if (q1 == 0 && q2 < 0)             sign = -1;
+                else if (q1 == 0 && q2 == 0 && q3 < 0)  sign = -1;
 
                 int q1_n = q1, q2_n = q2, q3_n = q3;
                 if (sign < 0) { q1_n = -q1; q2_n = -q2; q3_n = -q3; }
@@ -659,9 +685,10 @@ void encode(const std::string& inname, const std::string& outname,
 
     if (g_bpp_results_file.is_open()) {
         g_bpp_results_file
-            << "T=[" << g_threshold1 << "," << g_threshold2 << ","
-            << g_threshold3 << "," << g_threshold4 << ","
-            << g_threshold5 << "," << g_threshold6 << "]"
+            << "GT1=[" << g_gt1_t1 << "," << g_gt1_t2 << "," << g_gt1_t3 << ","
+            << g_gt1_t4 << "," << g_gt1_t5 << "," << g_gt1_t6 << "]"
+            << " GTN=[" << g_gtn_t1 << "," << g_gtn_t2 << "," << g_gtn_t3 << ","
+            << g_gtn_t4 << "," << g_gtn_t5 << "," << g_gtn_t6 << "]"
             << " | File=" << inname
             << " | Size=" << filesize << " bytes"
             << " | Pixels=" << pixels
@@ -670,12 +697,15 @@ void encode(const std::string& inname, const std::string& outname,
         g_bpp_results_file.flush();
     }
 
-    // Ausgabe-Format fuer PS-Regex: "  T=[1,4,8,16,32,64]: 4.4401 BPP"
-    std::cout << "  T=["
-              << g_threshold1 << "," << g_threshold2 << ","
-              << g_threshold3 << "," << g_threshold4 << ","
-              << g_threshold5 << "," << g_threshold6
-              << "]: " << std::fixed << std::setprecision(4) << bpp << " BPP"
+    // Ausgabe-Format fuer PS-Regex:
+    // "  GT1=[1,2,4,8,16,32] GTN=[1,2,4,8,16,32]: 4.4401 BPP"
+    std::cout << "  GT1=["
+              << g_gt1_t1 << "," << g_gt1_t2 << "," << g_gt1_t3 << ","
+              << g_gt1_t4 << "," << g_gt1_t5 << "," << g_gt1_t6 << "]"
+              << " GTN=["
+              << g_gtn_t1 << "," << g_gtn_t2 << "," << g_gtn_t3 << ","
+              << g_gtn_t4 << "," << g_gtn_t5 << "," << g_gtn_t6 << "]"
+              << ": " << std::fixed << std::setprecision(4) << bpp << " BPP"
               << std::endl;
 }
 
@@ -704,12 +734,15 @@ int main(int argc, char** argv)
 
     fs::create_directories(pars.outdir);
 
-    g_threshold1 = pars.threshold1;
-    g_threshold2 = pars.threshold2;
-    g_threshold3 = pars.threshold3;
-    g_threshold4 = pars.threshold4;
-    g_threshold5 = pars.threshold5;
-    g_threshold6 = pars.threshold6;
+    // GT1-Schwellen setzen
+    g_gt1_t1 = pars.gt1_t1;  g_gt1_t2 = pars.gt1_t2;
+    g_gt1_t3 = pars.gt1_t3;  g_gt1_t4 = pars.gt1_t4;
+    g_gt1_t5 = pars.gt1_t5;  g_gt1_t6 = pars.gt1_t6;
+
+    // GTN-Schwellen setzen
+    g_gtn_t1 = pars.gtn_t1;  g_gtn_t2 = pars.gtn_t2;
+    g_gtn_t3 = pars.gtn_t3;  g_gtn_t4 = pars.gtn_t4;
+    g_gtn_t5 = pars.gtn_t5;  g_gtn_t6 = pars.gtn_t6;
 
     std::string fullOutputPath = pars.outdir + "/" + pars.outname;
     std::string bpp_log_file   = pars.outdir + "/threshold_bpp_results.txt";
@@ -728,9 +761,10 @@ int main(int argc, char** argv)
             decode(pars.inname, fullOutputPath, groupSize, pars.outdir);
         } else {
             std::cout << "Kodiere: " << pars.inname << " -> " << fullOutputPath
-                      << " (T=[" << g_threshold1 << "," << g_threshold2 << ","
-                      << g_threshold3 << "," << g_threshold4 << ","
-                      << g_threshold5 << "," << g_threshold6 << "])" << std::endl;
+                      << " (GT1=[" << g_gt1_t1 << "," << g_gt1_t2 << "," << g_gt1_t3 << ","
+                      << g_gt1_t4 << "," << g_gt1_t5 << "," << g_gt1_t6 << "]"
+                      << " GTN=[" << g_gtn_t1 << "," << g_gtn_t2 << "," << g_gtn_t3 << ","
+                      << g_gtn_t4 << "," << g_gtn_t5 << "," << g_gtn_t6 << "])" << std::endl;
             encode(pars.inname, fullOutputPath, groupSize, pars.outdir);
         }
         std::cout << "OK" << std::endl;
