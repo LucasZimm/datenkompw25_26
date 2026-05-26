@@ -22,3 +22,5 @@ kodim21: 4.758 bpp
 kodim22: 4.825 bpp
 kodim23: 3.770 bpp
 kodim24: 4.919 bpp
+
+Durchschnitt: 4,622 BPP
