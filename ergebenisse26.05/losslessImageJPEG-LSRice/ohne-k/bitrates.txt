@@ -1,0 +1,26 @@
+kodim01: 10.403 bpp
+kodim02: 5.497 bpp
+kodim03: 4.736 bpp
+kodim04: 5.867 bpp
+kodim05: 11.067 bpp
+kodim06: 8.162 bpp
+kodim07: 5.080 bpp
+kodim08: 10.420 bpp
+kodim09: 5.261 bpp
+kodim10: 5.330 bpp
+kodim11: 7.230 bpp
+kodim12: 5.016 bpp
+kodim13: 15.422 bpp
+kodim14: 8.544 bpp
+kodim15: 5.643 bpp
+kodim16: 5.877 bpp
+kodim17: 6.112 bpp
+kodim18: 9.637 bpp
+kodim19: 6.960 bpp
+kodim20: 5.214 bpp
+kodim21: 7.948 bpp
+kodim22: 7.198 bpp
+kodim23: 4.521 bpp
+kodim24: 9.318 bpp
+
+Durchschnitt: 7,353 BPP
